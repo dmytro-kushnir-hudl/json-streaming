@@ -297,4 +297,284 @@ public class JsonStreamReaderTests
         await act.Should().ThrowAsync<OperationCanceledException>();
         count.Should().Be(2);
     }
+
+    // ── Each() / select-many ────────────────────────────────────────────────
+
+    [Fact]
+    public async Task ProcessArray_Each_FlattensTwoInnerArrays()
+    {
+        var json = """
+        {
+            "responses": [
+                {"messages": [{"id":1},{"id":2}]},
+                {"messages": [{"id":3}]}
+            ]
+        }
+        """;
+        var pipe = ToPipe(json);
+        var path = JsonPath.Root.Property("responses"u8).Each().Property("messages"u8);
+
+        var ids = new List<int>();
+        await JsonStreamReader.ProcessArrayAsync(
+            pipe,
+            path,
+            bytes =>
+            {
+                var doc = JsonDocument.Parse(bytes);
+                ids.Add(doc.RootElement.GetProperty("id").GetInt32());
+                doc.Dispose();
+            }
+        );
+
+        ids.Should().Equal(1, 2, 3);
+    }
+
+    [Fact]
+    public async Task ProcessArray_Each_NoSuffix_YieldsOuterElements()
+    {
+        var json = """{"items":[{"a":1},{"a":2},{"a":3}]}""";
+        var pipe = ToPipe(json);
+        var path = JsonPath.Root.Property("items"u8).Each();
+
+        var values = new List<int>();
+        await JsonStreamReader.ProcessArrayAsync(
+            pipe,
+            path,
+            bytes =>
+            {
+                var doc = JsonDocument.Parse(bytes);
+                values.Add(doc.RootElement.GetProperty("a").GetInt32());
+                doc.Dispose();
+            }
+        );
+
+        values.Should().Equal(1, 2, 3);
+    }
+
+    [Fact]
+    public async Task ProcessArray_Each_EmptyInnerArrays_YieldsNothing()
+    {
+        var json = """{"items":[{"msgs":[]},{"msgs":[]}]}""";
+        var pipe = ToPipe(json);
+        var path = JsonPath.Root.Property("items"u8).Each().Property("msgs"u8);
+
+        var count = await JsonStreamReader.ProcessArrayAsync(pipe, path, _ => { });
+
+        count.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task ProcessArray_Each_MixedEmpty_YieldsOnlyNonEmpty()
+    {
+        var json = """
+        {
+            "groups": [
+                {"items": []},
+                {"items": [1,2]},
+                {"items": []},
+                {"items": [3]}
+            ]
+        }
+        """;
+        var pipe = ToPipe(json);
+        var path = JsonPath.Root.Property("groups"u8).Each().Property("items"u8);
+
+        var values = new List<int>();
+        await JsonStreamReader.ProcessArrayAsync(
+            pipe,
+            path,
+            bytes =>
+            {
+                var doc = JsonDocument.Parse(bytes);
+                values.Add(doc.RootElement.GetInt32());
+                doc.Dispose();
+            }
+        );
+
+        values.Should().Equal(1, 2, 3);
+    }
+
+    [Fact]
+    public async Task ProcessArray_Each_ElementMissingSuffix_Skipped()
+    {
+        var json = """
+        {
+            "items": [
+                {"data": [1]},
+                {"other": "no data here"},
+                {"data": [2,3]}
+            ]
+        }
+        """;
+        var pipe = ToPipe(json);
+        var path = JsonPath.Root.Property("items"u8).Each().Property("data"u8);
+
+        var values = new List<int>();
+        await JsonStreamReader.ProcessArrayAsync(
+            pipe,
+            path,
+            bytes =>
+            {
+                var doc = JsonDocument.Parse(bytes);
+                values.Add(doc.RootElement.GetInt32());
+                doc.Dispose();
+            }
+        );
+
+        values.Should().Equal(1, 2, 3);
+    }
+
+    [Fact]
+    public async Task ProcessArray_Each_ExtraPropertiesSkipped()
+    {
+        var json = """
+        {
+            "items": [
+                {"meta":"x","data":[10],"footer":"y"},
+                {"data":[20,30],"extra":{"nested":true}}
+            ]
+        }
+        """;
+        var pipe = ToPipe(json);
+        var path = JsonPath.Root.Property("items"u8).Each().Property("data"u8);
+
+        var values = new List<int>();
+        await JsonStreamReader.ProcessArrayAsync(
+            pipe,
+            path,
+            bytes =>
+            {
+                var doc = JsonDocument.Parse(bytes);
+                values.Add(doc.RootElement.GetInt32());
+                doc.Dispose();
+            }
+        );
+
+        values.Should().Equal(10, 20, 30);
+    }
+
+    [Fact]
+    public async Task EnumerateArray_Each_YieldsAcrossInnerArrays()
+    {
+        var json = """
+        {
+            "pages": [
+                {"results": ["a","b"]},
+                {"results": ["c"]}
+            ]
+        }
+        """;
+        var pipe = ToPipe(json);
+        var path = JsonPath.Root.Property("pages"u8).Each().Property("results"u8);
+
+        var items = new List<string>();
+        await foreach (var doc in JsonStreamReader.EnumerateArrayAsync(pipe, path))
+        {
+            using (doc)
+                items.Add(doc.RootElement.GetString()!);
+        }
+
+        items.Should().Equal("a", "b", "c");
+    }
+
+    [Fact]
+    public async Task ProcessArray_Each_ParsedJsonPath()
+    {
+        var json = """{"groups":[{"items":[1]},{"items":[2,3]}]}""";
+        var pipe = ToPipe(json);
+        var path = JsonPath.Parse("$.groups[*].items");
+
+        var values = new List<int>();
+        await JsonStreamReader.ProcessArrayAsync(
+            pipe,
+            path,
+            bytes =>
+            {
+                var doc = JsonDocument.Parse(bytes);
+                values.Add(doc.RootElement.GetInt32());
+                doc.Dispose();
+            }
+        );
+
+        values.Should().Equal(1, 2, 3);
+    }
+
+    [Theory]
+    [InlineData(64)]
+    [InlineData(128)]
+    [InlineData(8192)]
+    public async Task ProcessArray_Each_SmallBuffers_SameResult(int bufferSize)
+    {
+        var json = """
+        {
+            "data": [
+                {"items": [{"v":1},{"v":2}]},
+                {"items": [{"v":3}]},
+                {"items": [{"v":4},{"v":5},{"v":6}]}
+            ]
+        }
+        """;
+        var pipe = ToPipe(json, bufferSize);
+        var path = JsonPath.Root.Property("data"u8).Each().Property("items"u8);
+
+        var values = new List<int>();
+        await JsonStreamReader.ProcessArrayAsync(
+            pipe,
+            path,
+            bytes =>
+            {
+                var doc = JsonDocument.Parse(bytes);
+                values.Add(doc.RootElement.GetProperty("v").GetInt32());
+                doc.Dispose();
+            }
+        );
+
+        values.Should().Equal(1, 2, 3, 4, 5, 6);
+    }
+
+    [Fact]
+    public async Task ProcessArray_Each_EmptyOuterArray_ReturnsZero()
+    {
+        var json = """{"items":[]}""";
+        var pipe = ToPipe(json);
+        var path = JsonPath.Root.Property("items"u8).Each().Property("data"u8);
+
+        var count = await JsonStreamReader.ProcessArrayAsync(pipe, path, _ => { });
+
+        count.Should().Be(0);
+    }
+
+    [Fact]
+    public async Task ProcessArray_Each_NestedSuffix()
+    {
+        var json = """
+        {
+            "pages": [
+                {"response": {"data": {"items": [1,2]}}},
+                {"response": {"data": {"items": [3]}}}
+            ]
+        }
+        """;
+        var pipe = ToPipe(json);
+        var path = JsonPath.Root
+            .Property("pages"u8)
+            .Each()
+            .Property("response"u8)
+            .Property("data"u8)
+            .Property("items"u8);
+
+        var values = new List<int>();
+        await JsonStreamReader.ProcessArrayAsync(
+            pipe,
+            path,
+            bytes =>
+            {
+                var doc = JsonDocument.Parse(bytes);
+                values.Add(doc.RootElement.GetInt32());
+                doc.Dispose();
+            }
+        );
+
+        values.Should().Equal(1, 2, 3);
+    }
 }
