@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;net9.0;net10.0</TargetFrameworks>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <PackageId>JsonStreaming</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>Dmytro Kushnir</Authors>
+    <Description>Bounded-memory streaming JSON array enumeration over PipeReader. Navigate to nested arrays, iterate items with zero-copy callbacks or IAsyncEnumerable, all with ~8KB working set regardless of input size.</Description>
+    <PackageTags>json;streaming;utf8;pipereader;zero-copy;system-text-json</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="System.IO.Pipelines" Version="9.0.4" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="JsonStreaming.Tests" />
+    <InternalsVisibleTo Include="JsonStreaming.Benchmarks" />
+  </ItemGroup>
+</Project>
