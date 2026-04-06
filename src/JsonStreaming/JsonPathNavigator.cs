@@ -29,8 +29,7 @@ internal static class JsonPathNavigator
         CancellationToken ct
     )
     {
-        var segmentsSpan = path.Segments;
-        if (segmentsSpan.IsEmpty)
+        if (path.Length == 0)
             return await SkipToRootArrayAsync(pipeReader, ct);
 
         var propertyNames = ExtractPropertyNames(path);

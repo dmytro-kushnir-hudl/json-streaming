@@ -38,25 +38,29 @@ public readonly struct Segment
 }
 
 /// <summary>
-/// Zero-allocation path descriptor for navigating into nested JSON structures.
+/// Immutable path descriptor for navigating into nested JSON structures.
 /// Built via a fluent API; translatable to/from JSONPath strings.
+/// Constructed once and reused — each builder call returns a new instance.
 ///
 /// <code>
 /// var path = JsonPath.Root.Property("response"u8).Each().Property("messages"u8);
 /// // Equivalent JSONPath: $.response[*].messages
 /// </code>
 /// </summary>
-public readonly struct JsonPath
+public sealed class JsonPath
 {
-    private readonly Segment[]? _segments;
-
-    private JsonPath(Segment[]? segments) => _segments = segments;
-
     /// <summary>Empty path — targets the root array.</summary>
-    public static JsonPath Root => default;
+    public static JsonPath Root { get; } = new([]);
+
+    private readonly Segment[] _segments;
+
+    private JsonPath(Segment[] segments) => _segments = segments;
 
     /// <summary>The segments that define this path.</summary>
-    public ReadOnlySpan<Segment> Segments => _segments.AsSpan();
+    public ReadOnlySpan<Segment> Segments => _segments;
+
+    /// <summary>Number of segments in this path.</summary>
+    public int Length => _segments.Length;
 
     /// <summary>
     /// Navigate into a property. The state machine will match this property name
@@ -106,7 +110,6 @@ public readonly struct JsonPath
             if (jsonPath[i] == '.')
             {
                 i++;
-                // Read property name until next . or [ or end
                 int start = i;
                 while (i < jsonPath.Length && jsonPath[i] != '.' && jsonPath[i] != '[')
                     i++;
@@ -116,14 +119,19 @@ public readonly struct JsonPath
                     segments.Add(new Segment(SegmentKind.Property, name));
                 }
             }
-            else if (i + 2 < jsonPath.Length && jsonPath[i] == '[' && jsonPath[i + 1] == '*' && jsonPath[i + 2] == ']')
+            else if (
+                i + 2 < jsonPath.Length
+                && jsonPath[i] == '['
+                && jsonPath[i + 1] == '*'
+                && jsonPath[i + 2] == ']'
+            )
             {
                 segments.Add(new Segment(SegmentKind.Each));
                 i += 3;
             }
             else
             {
-                i++; // skip unknown
+                i++;
             }
         }
 
@@ -135,7 +143,7 @@ public readonly struct JsonPath
     /// </summary>
     public string ToJsonPath()
     {
-        if (_segments is null or { Length: 0 })
+        if (_segments.Length == 0)
             return "$";
 
         var sb = new StringBuilder("$");
@@ -160,9 +168,8 @@ public readonly struct JsonPath
 
     private JsonPath Append(Segment segment)
     {
-        var existing = _segments ?? [];
-        var newArr = new Segment[existing.Length + 1];
-        existing.CopyTo(newArr, 0);
+        var newArr = new Segment[_segments.Length + 1];
+        _segments.CopyTo(newArr, 0);
         newArr[^1] = segment;
         return new JsonPath(newArr);
     }
