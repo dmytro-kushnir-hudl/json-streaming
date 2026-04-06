@@ -8,99 +8,40 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddHttpClient();
 var app = builder.Build();
 
-// ── GET /stream/comments — stream 500 comments from JSONPlaceholder ────
-// Root-level array → flat path. Verbatim passthrough with backpressure.
+// ── GET /stream/comments — verbatim passthrough ────────────────────────
+// 500 comments from JSONPlaceholder, root array, no transformation.
 app.MapGet(
     "/stream/comments",
     async (HttpContext ctx, IHttpClientFactory httpFactory) =>
     {
-        var ct = ctx.RequestAborted;
-        ctx.Response.ContentType = "application/json";
-        ctx.Features.Get<IHttpResponseBodyFeature>()?.DisableBuffering();
+        await using var upstream = await ctx.StreamFrom(httpFactory, "https://jsonplaceholder.typicode.com/comments");
 
-        using var http = httpFactory.CreateClient();
-        using var upstream = await http.SendAsync(
-            new HttpRequestMessage(
-                HttpMethod.Get,
-                "https://jsonplaceholder.typicode.com/comments"
-            ),
-            HttpCompletionOption.ResponseHeadersRead,
-            ct
-        );
-        await using var stream = await upstream.Content.ReadAsStreamAsync(ct);
-        var pipe = PipeReader.Create(stream, new StreamPipeReaderOptions(bufferSize: 8192));
-
-        var pipeWriter = ctx.Response.BodyWriter;
-        await using var writer = new Utf8JsonWriter(pipeWriter);
-        var options = new WriteOptions
-        {
-            AsyncFlush = async flushCt =>
-            {
-                await pipeWriter.FlushAsync(flushCt);
-            },
-        };
-
-        writer.WriteStartObject();
-        writer.WriteStartArray("results"u8);
-
-        var count = await JsonStreamReader.WriteArrayAsync(
-            pipe,
+        await JsonStreamPipeline.PassthroughArrayAsync(
+            upstream.Pipe,
             JsonPath.Root,
-            writer,
-            options,
-            ct
+            ctx.Response.BodyWriter,
+            "results",
+            upstream.Ct
         );
-
-        writer.WriteEndArray();
-        writer.WriteNumber("count"u8, count);
-        writer.WriteEndObject();
-        writer.Flush();
-
-        await pipeWriter.FlushAsync(ct);
-        await pipe.CompleteAsync();
     }
 );
 
-// ── GET /stream/products — typed deserialization + business logic ───────
-// Uses source-generated JsonSerializer for zero-reflection deserialization,
-// computes a discounted price, and serializes a different output shape.
+// ── GET /stream/products — typed transform ─────────────────────────────
+// Deserialize ProductInput → compute sale price → serialize ProductOutput.
 app.MapGet(
     "/stream/products",
     async (HttpContext ctx, IHttpClientFactory httpFactory, int limit = 100) =>
     {
-        var ct = ctx.RequestAborted;
-        ctx.Response.ContentType = "application/json";
-        ctx.Features.Get<IHttpResponseBodyFeature>()?.DisableBuffering();
-
-        using var http = httpFactory.CreateClient();
-        using var upstream = await http.SendAsync(
-            new HttpRequestMessage(
-                HttpMethod.Get,
-                $"https://dummyjson.com/products?limit={limit}"
-            ),
-            HttpCompletionOption.ResponseHeadersRead,
-            ct
+        await using var upstream = await ctx.StreamFrom(
+            httpFactory,
+            $"https://dummyjson.com/products?limit={limit}"
         );
-        await using var stream = await upstream.Content.ReadAsStreamAsync(ct);
-        var pipe = PipeReader.Create(stream, new StreamPipeReaderOptions(bufferSize: 8192));
 
-        var pipeWriter = ctx.Response.BodyWriter;
-        await using var writer = new Utf8JsonWriter(pipeWriter);
-        var options = new WriteOptions
-        {
-            AsyncFlush = async flushCt =>
-            {
-                await pipeWriter.FlushAsync(flushCt);
-            },
-        };
-
-        writer.WriteStartObject();
-        writer.WriteStartArray("products"u8);
-
-        var count = await JsonStreamReaderTyped.WriteArrayAsync(
-            pipe,
+        await JsonStreamPipeline.TransformArrayAsync(
+            upstream.Pipe,
             "products",
-            writer,
+            ctx.Response.BodyWriter,
+            "products",
             SampleJsonContext.Default.ProductInput,
             SampleJsonContext.Default.ProductOutput,
             product => new ProductOutput
@@ -116,87 +57,37 @@ app.MapGet(
                 Rating = product.Rating,
                 InStock = product.Stock > 0,
             },
-            options,
-            ct
+            upstream.Ct
         );
-
-        writer.WriteEndArray();
-        writer.WriteNumber("count"u8, count);
-        writer.WriteEndObject();
-        writer.Flush();
-
-        await pipeWriter.FlushAsync(ct);
-        await pipe.CompleteAsync();
     }
 );
 
-// ── GET /stream/photos — stream 5000 photos, filter by albumId ─────────
-// Root-level array, caller-side filtering via WriteArrayAsync transform.
-// The delegate writes only matching items — skipped items produce no output.
+// ── GET /stream/photos — filter by albumId ─────────────────────────────
+// 5000 photos, return null from transform to skip non-matching items.
 app.MapGet(
     "/stream/photos",
     async (HttpContext ctx, IHttpClientFactory httpFactory, int albumId = 1) =>
     {
-        var ct = ctx.RequestAborted;
-        ctx.Response.ContentType = "application/json";
-        ctx.Features.Get<IHttpResponseBodyFeature>()?.DisableBuffering();
-
-        using var http = httpFactory.CreateClient();
-        using var upstream = await http.SendAsync(
-            new HttpRequestMessage(
-                HttpMethod.Get,
-                "https://jsonplaceholder.typicode.com/photos"
-            ),
-            HttpCompletionOption.ResponseHeadersRead,
-            ct
+        await using var upstream = await ctx.StreamFrom(
+            httpFactory,
+            "https://jsonplaceholder.typicode.com/photos"
         );
-        await using var stream = await upstream.Content.ReadAsStreamAsync(ct);
-        var pipe = PipeReader.Create(stream, new StreamPipeReaderOptions(bufferSize: 8192));
 
-        var pipeWriter = ctx.Response.BodyWriter;
-        await using var writer = new Utf8JsonWriter(pipeWriter);
-        var options = new WriteOptions
-        {
-            AsyncFlush = async flushCt =>
-            {
-                await pipeWriter.FlushAsync(flushCt);
-            },
-        };
-
-        writer.WriteStartObject();
-        writer.WriteStartArray("photos"u8);
-
-        int written = 0;
-        await JsonStreamReader.WriteArrayAsync(
-            pipe,
+        await JsonStreamPipeline.TransformArrayAsync(
+            upstream.Pipe,
             JsonPath.Root,
-            writer,
-            (itemBytes, w) =>
-            {
-                using var doc = JsonDocument.Parse(itemBytes);
-                if (doc.RootElement.GetProperty("albumId").GetInt32() == albumId)
-                {
-                    doc.RootElement.WriteTo(w);
-                    written++;
-                }
-            },
-            options,
-            ct
+            ctx.Response.BodyWriter,
+            "photos",
+            SampleJsonContext.Default.Photo,
+            SampleJsonContext.Default.Photo,
+            photo => photo.AlbumId == albumId ? photo : null,
+            upstream.Ct
         );
-
-        writer.WriteEndArray();
-        writer.WriteNumber("count"u8, written);
-        writer.WriteEndObject();
-        writer.Flush();
-
-        await pipeWriter.FlushAsync(ct);
-        await pipe.CompleteAsync();
     }
 );
 
-// ── GET /stream/todos — stream todos across multiple pages ─────────────
-// Fetches 3 pages from DummyJSON sequentially, streaming each page's
-// $.todos array directly to the client. No buffering of full pages.
+// ── GET /stream/todos — sequential pages, same output array ────────────
+// Fetches 3 pages, streams each page's $.todos into one output array.
 app.MapGet(
     "/stream/todos",
     async (HttpContext ctx, IHttpClientFactory httpFactory) =>
@@ -215,12 +106,12 @@ app.MapGet(
             },
         };
 
+        using var http = httpFactory.CreateClient();
+
         writer.WriteStartObject();
         writer.WriteStartArray("todos"u8);
 
-        using var http = httpFactory.CreateClient();
         int totalCount = 0;
-
         for (int skip = 0; skip < 90; skip += 30)
         {
             using var upstream = await http.SendAsync(
@@ -259,8 +150,60 @@ app.MapGet(
 
 app.Run();
 
+// ── ASP.NET helper ─────────────────────────────────────────────────────
+
+static class HttpContextExtensions
+{
+    /// <summary>
+    /// Fetches a URL with streaming (ResponseHeadersRead), sets response headers,
+    /// and returns a handle that owns the HttpClient + response lifecycle.
+    /// Dispose the handle after streaming is complete.
+    /// </summary>
+    public static async Task<UpstreamPipe> StreamFrom(
+        this HttpContext ctx,
+        IHttpClientFactory httpFactory,
+        string url
+    )
+    {
+        ctx.Response.ContentType = "application/json";
+        ctx.Features.Get<IHttpResponseBodyFeature>()?.DisableBuffering();
+
+        var ct = ctx.RequestAborted;
+        var http = httpFactory.CreateClient();
+        var upstream = await http.SendAsync(
+            new HttpRequestMessage(HttpMethod.Get, url),
+            HttpCompletionOption.ResponseHeadersRead,
+            ct
+        );
+        var stream = await upstream.Content.ReadAsStreamAsync(ct);
+        var pipe = PipeReader.Create(stream, new StreamPipeReaderOptions(bufferSize: 8192));
+
+        return new UpstreamPipe(pipe, ct, http, upstream);
+    }
+}
+
+/// <summary>
+/// Owns the PipeReader + upstream HTTP resources. Dispose after streaming.
+/// </summary>
+sealed class UpstreamPipe(
+    PipeReader pipe,
+    CancellationToken ct,
+    HttpClient http,
+    HttpResponseMessage response
+) : IAsyncDisposable
+{
+    public PipeReader Pipe => pipe;
+    public CancellationToken Ct => ct;
+
+    public async ValueTask DisposeAsync()
+    {
+        await pipe.CompleteAsync();
+        response.Dispose();
+        http.Dispose();
+    }
+}
+
 // ── Source-generated JSON types ────────────────────────────────────────
-// Zero reflection, AOT-compatible. Used by /stream/products.
 
 public sealed record ProductInput
 {
@@ -284,10 +227,20 @@ public sealed record ProductOutput
     public bool InStock { get; init; }
 }
 
+public sealed record Photo
+{
+    public int AlbumId { get; init; }
+    public int Id { get; init; }
+    public string Title { get; init; } = "";
+    public string Url { get; init; } = "";
+    public string ThumbnailUrl { get; init; } = "";
+}
+
 [JsonSourceGenerationOptions(
     PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
     DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
 )]
 [JsonSerializable(typeof(ProductInput))]
 [JsonSerializable(typeof(ProductOutput))]
+[JsonSerializable(typeof(Photo))]
 public partial class SampleJsonContext : JsonSerializerContext;
