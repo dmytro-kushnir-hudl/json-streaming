@@ -97,39 +97,24 @@ app.MapGet(
         writer.WriteStartObject();
         writer.WriteStartArray("products"u8);
 
-        var count = await JsonStreamReader.WriteArrayAsync(
+        var count = await JsonStreamReaderTyped.WriteArrayAsync(
             pipe,
             "products",
             writer,
-            (itemBytes, w) =>
+            SampleJsonContext.Default.ProductInput,
+            SampleJsonContext.Default.ProductOutput,
+            product => new ProductOutput
             {
-                // Deserialize into typed record via source generator — no reflection
-                var reader = new Utf8JsonReader(itemBytes);
-                var product = JsonSerializer.Deserialize(
-                    ref reader,
-                    SampleJsonContext.Default.ProductInput
-                );
-                if (product is null)
-                    return;
-
-                // Business logic: compute sale price
-                var salePrice = Math.Round(
+                Id = product.Id,
+                Title = product.Title,
+                Brand = product.Brand ?? "Unknown",
+                OriginalPrice = product.Price,
+                SalePrice = Math.Round(
                     product.Price * (1 - product.DiscountPercentage / 100),
                     2
-                );
-
-                // Serialize a different output shape via source generator
-                var output = new ProductOutput
-                {
-                    Id = product.Id,
-                    Title = product.Title,
-                    Brand = product.Brand ?? "Unknown",
-                    OriginalPrice = product.Price,
-                    SalePrice = salePrice,
-                    Rating = product.Rating,
-                    InStock = product.Stock > 0,
-                };
-                JsonSerializer.Serialize(w, output, SampleJsonContext.Default.ProductOutput);
+                ),
+                Rating = product.Rating,
+                InStock = product.Stock > 0,
             },
             options,
             ct
