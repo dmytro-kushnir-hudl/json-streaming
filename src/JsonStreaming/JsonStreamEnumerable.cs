@@ -1,7 +1,6 @@
 using System.IO.Pipelines;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
-using System.Threading.Channels;
 
 namespace JsonStreaming;
 
@@ -36,8 +35,6 @@ public static class JsonStreamEnumerable
         CancellationToken ct = default
     ) => EnumerateSimpleAsync(pipeReader, JsonPathNavigator.ParseDotPath(path), ct);
 
-    // ── Simple path ────────────────────────────────────────────────────────
-
     private static async IAsyncEnumerable<JsonDocument> EnumerateSimpleAsync(
         PipeReader pipeReader,
         JsonPath path,
@@ -48,32 +45,10 @@ public static class JsonStreamEnumerable
         if (navState is null)
             yield break;
 
-        // Reuse the core callback loop via a bounded channel.
-        // Channel capacity 1: the producer blocks after writing one item until
-        // the consumer yields it, so memory stays bounded.
-        var channel = Channel.CreateUnbounded<JsonDocument>(
-            new UnboundedChannelOptions { SingleWriter = true, SingleReader = true }
-        );
-
-        var producer = ProduceAsync(
-            () =>
-                JsonStreamReader.IterateItemsAsync(
-                    pipeReader,
-                    navState.Value,
-                    itemBytes => channel.Writer.TryWrite(JsonDocument.Parse(itemBytes)),
-                    ct
-                ),
-            channel.Writer,
-            ct
-        );
-
-        await foreach (var doc in channel.Reader.ReadAllAsync(ct))
+        await foreach (var doc in CollectAndYieldAsync(
+            (processItem) => JsonStreamReader.IterateItemsAsync(pipeReader, navState.Value, processItem, ct)))
             yield return doc;
-
-        await producer;
     }
-
-    // ── Select-many path ───────────────────────────────────────────────────
 
     private static async IAsyncEnumerable<JsonDocument> EnumerateSelectManyAsync(
         PipeReader pipeReader,
@@ -88,53 +63,36 @@ public static class JsonStreamEnumerable
         if (outerState is null)
             yield break;
 
-        var channel = Channel.CreateUnbounded<JsonDocument>(
-            new UnboundedChannelOptions { SingleWriter = true, SingleReader = true }
-        );
+        if (suffixNames.Length == 0)
+        {
+            await foreach (var doc in CollectAndYieldAsync(
+                (processItem) => JsonStreamReader.IterateItemsAsync(pipeReader, outerState.Value, processItem, ct)))
+                yield return doc;
+            yield break;
+        }
 
-        Func<Task<int>> iterateFunc =
-            suffixNames.Length == 0
-                ? () =>
-                    JsonStreamReader.IterateItemsAsync(
-                        pipeReader,
-                        outerState.Value,
-                        itemBytes => channel.Writer.TryWrite(JsonDocument.Parse(itemBytes)),
-                        ct
-                    )
-                : () =>
-                    JsonStreamReader.IterateSelectManyAsync(
-                        pipeReader,
-                        outerState.Value,
-                        suffixNames,
-                        itemBytes => channel.Writer.TryWrite(JsonDocument.Parse(itemBytes)),
-                        ct
-                    );
-
-        var producer = ProduceAsync(iterateFunc, channel.Writer, ct);
-
-        await foreach (var doc in channel.Reader.ReadAllAsync(ct))
+        await foreach (var doc in CollectAndYieldAsync(
+            (processItem) => JsonStreamReader.IterateSelectManyAsync(pipeReader, outerState.Value, suffixNames, processItem, ct)))
             yield return doc;
-
-        await producer;
     }
 
-    // ── Producer helper ────────────────────────────────────────────────────
-
-    private static async Task ProduceAsync(
-        Func<Task<int>> iterate,
-        ChannelWriter<JsonDocument> writer,
-        CancellationToken ct
+    /// <summary>
+    /// Runs the core callback-based iteration, collecting parsed JsonDocuments
+    /// into a list, then yields them. The callback is synchronous — it just
+    /// parses the byte span into a JsonDocument and adds it to the list.
+    /// </summary>
+    private static async IAsyncEnumerable<JsonDocument> CollectAndYieldAsync(
+        Func<System.Action<System.Buffers.ReadOnlySequence<byte>>, Task<int>> iterate,
+        [EnumeratorCancellation] CancellationToken ct = default
     )
     {
-        try
+        var items = new List<JsonDocument>();
+        await iterate(itemBytes => items.Add(JsonDocument.Parse(itemBytes)));
+
+        foreach (var doc in items)
         {
-            await iterate();
+            ct.ThrowIfCancellationRequested();
+            yield return doc;
         }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            writer.TryComplete(ex);
-            return;
-        }
-        writer.TryComplete();
     }
 }
