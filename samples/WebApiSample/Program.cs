@@ -337,7 +337,7 @@ app.MapGet(
                         2
                     ),
                     Rating = product.Rating,
-                    InStock = product.Stock > 0,
+                    InStock = product.Id % 2 == 0,
                 };
 
                 // Write one JSON object per line — no array wrapper
