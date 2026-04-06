@@ -7,3 +7,7 @@ obj/
 *.nupkg
 *.snupkg
 BenchmarkDotNet.Artifacts/
+*.nettrace
+*.etlx
+*.speedscope.json
+*.gcdump
