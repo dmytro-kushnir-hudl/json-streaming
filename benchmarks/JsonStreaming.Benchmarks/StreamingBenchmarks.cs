@@ -18,7 +18,7 @@ namespace JsonStreaming.Benchmarks;
 [Orderer(SummaryOrderPolicy.FastestToSlowest)]
 public class StreamingBenchmarks
 {
-    [Params(100_000)]
+    [Params(200_000)]
     public int ItemCount { get; set; }
 
     private byte[] _json = [];
@@ -48,7 +48,7 @@ public class StreamingBenchmarks
         JsonSerializer.Serialize(Stream.Null, results, BenchJsonContext.Default.ListBenchItemSlim);
     }
 
-    // ── 3. WriteArray: verbatim (JsonDocument per item) ────────────────────
+    // ── 3. WriteArray: verbatim ───────────────────────────────────────────
 
     [Benchmark(Description = "WriteArray: verbatim")]
     public async Task<int> Write_Verbatim()
@@ -56,34 +56,12 @@ public class StreamingBenchmarks
         var pipe = ToPipe(_json);
         await using var writer = new Utf8JsonWriter(Stream.Null, SkipValidation);
         writer.WriteStartArray();
-        var count = await JsonStreamReader.WriteArrayAsync(pipe, "items", writer);
+        var count = await JsonStreamReader.WriteArrayAsync(pipe, "items", writer, FlushOptions);
         writer.WriteEndArray();
         return count;
     }
 
-    // ── 4. WriteArray: verbatim + flush ────────────────────────────────────
-
-    [Benchmark(Description = "WriteArray: verbatim + flush (16KB)")]
-    public async Task<int> Write_VerbatimFlush()
-    {
-        var pipe = ToPipe(_json);
-        await using var writer = new Utf8JsonWriter(Stream.Null, SkipValidation);
-        writer.WriteStartArray();
-        var count = await JsonStreamReader.WriteArrayAsync(
-            pipe,
-            "items",
-            writer,
-            new WriteOptions
-            {
-                FlushThreshold = 16_384,
-                AsyncFlush = _ => ValueTask.CompletedTask,
-            }
-        );
-        writer.WriteEndArray();
-        return count;
-    }
-
-    // ── 5. WriteArray: transform via JsonDocument ──────────────────────────
+    // ── 4. WriteArray: transform via JsonDocument ──────────────────────────
 
     [Benchmark(Description = "WriteArray: transform (JsonDocument)")]
     public async Task<int> Write_TransformJsonDocument()
@@ -103,7 +81,8 @@ public class StreamingBenchmarks
                 w.WriteNumber("id"u8, root.GetProperty("id").GetInt32());
                 w.WriteString("title"u8, root.GetProperty("title").GetString());
                 w.WriteEndObject();
-            }
+            },
+            FlushOptions
         );
         writer.WriteEndArray();
         return count;
@@ -149,7 +128,8 @@ public class StreamingBenchmarks
                     }
                 }
                 w.WriteEndObject();
-            }
+            },
+            FlushOptions
         );
         writer.WriteEndArray();
         return count;
@@ -174,7 +154,8 @@ public class StreamingBenchmarks
                 w.WriteNumber("id"u8, item.Id);
                 w.WriteString("title"u8, item.Title);
                 w.WriteEndObject();
-            }
+            },
+            FlushOptions
         );
         writer.WriteEndArray();
         return count;
@@ -194,7 +175,8 @@ public class StreamingBenchmarks
             writer,
             BenchJsonContext.Default.BenchItem,
             BenchJsonContext.Default.BenchItemSlim,
-            item => new BenchItemSlim { Id = item.Id, Title = item.Title }
+            item => new BenchItemSlim { Id = item.Id, Title = item.Title },
+            FlushOptions
         );
         writer.WriteEndArray();
         return count;
@@ -208,12 +190,7 @@ public class StreamingBenchmarks
         var pipe = ToPipe(_json);
         await using var writer = new Utf8JsonWriter(Stream.Null, SkipValidation);
         writer.WriteStartArray();
-        var count = await JsonStreamReaderTyped.WriteArrayAsync(
-            pipe,
-            "items",
-            writer,
-            BenchJsonContext.Default.BenchItem
-        );
+        var count = await JsonStreamReader.WriteArrayAsync(pipe, "items", writer, FlushOptions);
         writer.WriteEndArray();
         return count;
     }
@@ -221,6 +198,12 @@ public class StreamingBenchmarks
     // ── Helpers ─────────────────────────────────────────────────────────────
 
     private static readonly JsonWriterOptions SkipValidation = new() { SkipValidation = true };
+
+    private static readonly WriteOptions FlushOptions = new()
+    {
+        FlushThreshold = 16_384,
+        AsyncFlush = _ => ValueTask.CompletedTask,
+    };
 
     private static PipeReader ToPipe(byte[] data) =>
         PipeReader.Create(new MemoryStream(data), new StreamPipeReaderOptions(bufferSize: 8192));
