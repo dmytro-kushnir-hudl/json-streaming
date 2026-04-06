@@ -112,7 +112,7 @@ public static class JsonStreamPipeline
             writer.WriteString("error"u8, error);
         writer.WriteEndObject();
 
-        writer.Flush();
+        await writer.FlushAsync(ct);
         await output.FlushAsync(ct);
 
         return written;
@@ -173,7 +173,7 @@ public static class JsonStreamPipeline
             writer.WriteString("error"u8, error);
         writer.WriteEndObject();
 
-        writer.Flush();
+        await writer.FlushAsync(ct);
         await output.FlushAsync(ct);
 
         return written;
@@ -233,7 +233,7 @@ public static class JsonStreamPipeline
             writer.WriteString("error"u8, error);
         writer.WriteEndObject();
 
-        writer.Flush();
+        await writer.FlushAsync(ct);
         await output.FlushAsync(ct);
 
         return written;
