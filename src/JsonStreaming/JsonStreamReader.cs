@@ -11,8 +11,8 @@ namespace JsonStreaming;
 ///
 /// Two consumption modes:
 /// <list type="bullet">
-///   <item><see cref="EnumerateArrayAsync"/> — yields <see cref="JsonDocument"/> per item</item>
-///   <item><see cref="ProcessArrayAsync"/> — invokes a callback with raw bytes per item (zero-copy)</item>
+///   <item><c>EnumerateArrayAsync</c> — yields <see cref="JsonDocument"/> per item</item>
+///   <item><c>ProcessArrayAsync</c> — invokes a callback with raw bytes per item (zero-copy)</item>
 /// </list>
 ///
 /// Supports <see cref="SegmentKind.Each"/> for select-many: <c>$.responses[*].messages</c>
@@ -30,9 +30,10 @@ public static class JsonStreamReader
         PipeReader pipeReader,
         JsonPath path,
         CancellationToken ct = default
-    ) => HasEach(path)
-        ? EnumerateSelectManyCoreAsync(pipeReader, path, ct)
-        : EnumerateArrayCoreAsync(pipeReader, path, ct);
+    ) =>
+        HasEach(path)
+            ? EnumerateSelectManyCoreAsync(pipeReader, path, ct)
+            : EnumerateArrayCoreAsync(pipeReader, path, ct);
 
     /// <summary>
     /// Convenience overload accepting a dot-separated path string.
@@ -55,9 +56,10 @@ public static class JsonStreamReader
         JsonPath path,
         Action<ReadOnlySequence<byte>> processItem,
         CancellationToken ct = default
-    ) => HasEach(path)
-        ? ProcessSelectManyCoreAsync(pipeReader, path, processItem, ct)
-        : ProcessArrayCoreAsync(pipeReader, path, processItem, ct);
+    ) =>
+        HasEach(path)
+            ? ProcessSelectManyCoreAsync(pipeReader, path, processItem, ct)
+            : ProcessArrayCoreAsync(pipeReader, path, processItem, ct);
 
     /// <summary>
     /// Convenience overload accepting a dot-separated path string.
@@ -130,28 +132,8 @@ public static class JsonStreamReader
         var suffix = JsonPath.Root;
         while (i < segments.Length)
         {
-            suffix = prefix.Segments.Length == 0
-                ? suffix.Property(segments[i].Name.Span)
-                : suffix.Property(segments[i].Name.Span);
+            suffix = suffix.Property(segments[i].Name.Span);
             i++;
-        }
-
-        // Fix: rebuild suffix properly
-        suffix = JsonPath.Root;
-        var segs = path.Segments;
-        int eachIdx = -1;
-        for (int j = 0; j < segs.Length; j++)
-        {
-            if (segs[j].Kind == SegmentKind.Each)
-            {
-                eachIdx = j;
-                break;
-            }
-        }
-        if (eachIdx >= 0)
-        {
-            for (int j = eachIdx + 1; j < segs.Length; j++)
-                suffix = suffix.Property(segs[j].Name.Span);
         }
 
         return (prefix, suffix);
@@ -179,7 +161,13 @@ public static class JsonStreamReader
         }
 
         // Each() with suffix: for each outer element, find inner array and yield its items
-        return await IterateSelectManyAsync(pipeReader, outerState.Value, suffixNames, processItem, ct);
+        return await IterateSelectManyAsync(
+            pipeReader,
+            outerState.Value,
+            suffixNames,
+            processItem,
+            ct
+        );
     }
 
     private static async IAsyncEnumerable<JsonDocument> EnumerateSelectManyCoreAsync(
@@ -203,7 +191,14 @@ public static class JsonStreamReader
         }
 
         // Each() with suffix — unified state machine yields JsonDocuments
-        await foreach (var doc in IterateSelectManyDocumentsAsync(pipeReader, outerState.Value, suffixNames, ct))
+        await foreach (
+            var doc in IterateSelectManyDocumentsAsync(
+                pipeReader,
+                outerState.Value,
+                suffixNames,
+                ct
+            )
+        )
             yield return doc;
     }
 
@@ -220,13 +215,13 @@ public static class JsonStreamReader
 
     private enum EachPhase
     {
-        InOuterArray,         // Expect StartObject or EndArray
-        NavSuffix_Search,     // Inside element, searching for suffix property
-        NavSuffix_ExpectObj,  // Found non-terminal suffix prop, expect StartObject
-        NavSuffix_Skip,       // Skip non-matching property value
-        ExpectInnerArray,     // Found terminal suffix prop, expect StartArray
-        InInnerArray,         // Yielding inner items (handled by caller)
-        SkipElement,          // Skip remaining content of outer element
+        InOuterArray, // Expect StartObject or EndArray
+        NavSuffixSearch, // Inside element, searching for suffix property
+        NavSuffixExpectObj, // Found non-terminal suffix prop, expect StartObject
+        NavSuffixSkip, // Skip non-matching property value
+        ExpectInnerArray, // Found terminal suffix prop, expect StartArray
+        InInnerArray, // Yielding inner items (handled by caller)
+        SkipElement, // Skip remaining content of outer element
         Done,
     }
 
@@ -252,12 +247,16 @@ public static class JsonStreamReader
 
             var readResult = await pipeReader.ReadAsync(ct);
             var buffer = readResult.Buffer;
-            var reader = new Utf8JsonReader(buffer, isFinalBlock: readResult.IsCompleted, jsonState);
+            var reader = new Utf8JsonReader(
+                buffer,
+                isFinalBlock: readResult.IsCompleted,
+                jsonState
+            );
 
             while (reader.Read())
             {
                 // ── Skipping (depth-tracked) ──────────────────────
-                if (phase is EachPhase.NavSuffix_Skip or EachPhase.SkipElement)
+                if (phase is EachPhase.NavSuffixSkip or EachPhase.SkipElement)
                 {
                     switch (reader.TokenType)
                     {
@@ -328,7 +327,7 @@ public static class JsonStreamReader
                         {
                             suffixIndex = 0;
                             elementDepth = 1;
-                            phase = EachPhase.NavSuffix_Search;
+                            phase = EachPhase.NavSuffixSearch;
                         }
                         else
                         {
@@ -337,7 +336,7 @@ public static class JsonStreamReader
                         }
                         break;
 
-                    case EachPhase.NavSuffix_Search:
+                    case EachPhase.NavSuffixSearch:
                         if (reader.TokenType == JsonTokenType.PropertyName)
                         {
                             if (reader.ValueTextEquals(suffixNames[suffixIndex]))
@@ -347,13 +346,13 @@ public static class JsonStreamReader
                                 else
                                 {
                                     suffixIndex++;
-                                    phase = EachPhase.NavSuffix_ExpectObj;
+                                    phase = EachPhase.NavSuffixExpectObj;
                                 }
                             }
                             else
                             {
-                                phase = EachPhase.NavSuffix_Skip;
-                                returnPhase = EachPhase.NavSuffix_Search;
+                                phase = EachPhase.NavSuffixSkip;
+                                returnPhase = EachPhase.NavSuffixSearch;
                                 skipDepth = 0;
                             }
                         }
@@ -369,11 +368,11 @@ public static class JsonStreamReader
                         }
                         break;
 
-                    case EachPhase.NavSuffix_ExpectObj:
+                    case EachPhase.NavSuffixExpectObj:
                         if (reader.TokenType == JsonTokenType.StartObject)
                         {
                             elementDepth++;
-                            phase = EachPhase.NavSuffix_Search;
+                            phase = EachPhase.NavSuffixSearch;
                         }
                         else
                         {
@@ -410,7 +409,10 @@ public static class JsonStreamReader
                             if (reader.TrySkip())
                             {
                                 long itemLength = reader.BytesConsumed - itemStart;
-                                var itemSlice = buffer.Slice(buffer.GetPosition(itemStart), itemLength);
+                                var itemSlice = buffer.Slice(
+                                    buffer.GetPosition(itemStart),
+                                    itemLength
+                                );
                                 processItem(itemSlice);
                                 count++;
                             }
@@ -484,7 +486,11 @@ public static class JsonStreamReader
 
             var readResult = await pipeReader.ReadAsync(ct);
             var buffer = readResult.Buffer;
-            var reader = new Utf8JsonReader(buffer, isFinalBlock: readResult.IsCompleted, jsonState);
+            var reader = new Utf8JsonReader(
+                buffer,
+                isFinalBlock: readResult.IsCompleted,
+                jsonState
+            );
 
             if (!reader.Read())
             {
@@ -541,7 +547,11 @@ public static class JsonStreamReader
 
             var readResult = await pipeReader.ReadAsync(ct);
             var buffer = readResult.Buffer;
-            var reader = new Utf8JsonReader(buffer, isFinalBlock: readResult.IsCompleted, jsonState);
+            var reader = new Utf8JsonReader(
+                buffer,
+                isFinalBlock: readResult.IsCompleted,
+                jsonState
+            );
 
             if (!reader.Read())
             {
@@ -589,7 +599,6 @@ public static class JsonStreamReader
         ExpectObject,
         ExpectArray,
         Skipping,
-        Done,
     }
 
     private static async Task<JsonReaderState?> NavigateToArrayAsync(
@@ -610,11 +619,15 @@ public static class JsonStreamReader
         int segmentIndex = 0;
         int skipDepth = 0;
 
-        while (phase != NavPhase.Done)
+        while (true)
         {
             var readResult = await pipeReader.ReadAsync(ct);
             var buffer = readResult.Buffer;
-            var reader = new Utf8JsonReader(buffer, isFinalBlock: readResult.IsCompleted, jsonState);
+            var reader = new Utf8JsonReader(
+                buffer,
+                isFinalBlock: readResult.IsCompleted,
+                jsonState
+            );
 
             while (reader.Read())
             {
@@ -695,8 +708,6 @@ public static class JsonStreamReader
                         }
                 }
 
-                if (phase == NavPhase.Done)
-                    break;
             }
 
             jsonState = reader.CurrentState;
@@ -705,8 +716,6 @@ public static class JsonStreamReader
             if (readResult.IsCompleted)
                 return null;
         }
-
-        return null;
     }
 
     private static async Task<JsonReaderState?> SkipToRootArrayAsync(
@@ -720,7 +729,11 @@ public static class JsonStreamReader
         {
             var readResult = await pipeReader.ReadAsync(ct);
             var buffer = readResult.Buffer;
-            var reader = new Utf8JsonReader(buffer, isFinalBlock: readResult.IsCompleted, jsonState);
+            var reader = new Utf8JsonReader(
+                buffer,
+                isFinalBlock: readResult.IsCompleted,
+                jsonState
+            );
 
             if (reader.Read() && reader.TokenType == JsonTokenType.StartArray)
             {

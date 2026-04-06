@@ -22,6 +22,7 @@ public enum SegmentKind : byte
 /// </summary>
 public readonly struct Segment
 {
+    /// <inheritdoc cref="SegmentKind"/>
     public SegmentKind Kind { get; }
 
     /// <summary>
@@ -154,6 +155,7 @@ public readonly struct JsonPath
         return sb.ToString();
     }
 
+    /// <inheritdoc />
     public override string ToString() => ToJsonPath();
 
     private JsonPath Append(Segment segment)
