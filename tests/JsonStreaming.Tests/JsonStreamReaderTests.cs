@@ -626,6 +626,86 @@ public class JsonStreamReaderTests
         flushCounter.FlushCount.Should().BeGreaterThanOrEqualTo(2);
     }
 
+    [Fact]
+    public async Task WriteArray_AsyncFlush_IsInvoked()
+    {
+        // 20 items, small threshold — should trigger multiple async flushes
+        var items = string.Join(
+            ",",
+            Enumerable.Range(0, 20).Select(i => $$"""{"id":{{i}},"data":"padding-value-here"}""")
+        );
+        var json = $$$"""{"items":[{{{items}}}]}""";
+        var pipe = ToPipe(json);
+
+        var output = new ArrayBufferWriter<byte>();
+        using var writer = new Utf8JsonWriter(output);
+
+        int asyncFlushCount = 0;
+        var options = new WriteOptions
+        {
+            FlushThreshold = 200,
+            AsyncFlush = _ =>
+            {
+                asyncFlushCount++;
+                return ValueTask.CompletedTask;
+            },
+        };
+
+        writer.WriteStartArray();
+        var count = await JsonStreamReader.WriteArrayAsync(pipe, "items", writer, options);
+        writer.WriteEndArray();
+        writer.Flush();
+
+        count.Should().Be(20);
+        asyncFlushCount.Should().BeGreaterThanOrEqualTo(2, "async flush should fire multiple times");
+
+        // Verify output is still valid JSON
+        var result = JsonDocument.Parse(output.WrittenMemory);
+        result.RootElement.GetArrayLength().Should().Be(20);
+    }
+
+    [Fact]
+    public async Task WriteArray_AsyncFlush_SelectMany_IsInvoked()
+    {
+        // Each item ~40 bytes, 15 items total ~600 bytes, threshold 100 → multiple flushes
+        var makeItems = (int start, int count) =>
+            string.Join(
+                ",",
+                Enumerable
+                    .Range(start, count)
+                    .Select(i => $$"""{"id":{{i}},"val":"item-{{i}}-padding"}""")
+            );
+        var json =
+            $$"""{"data":[{"items":[{{makeItems(1, 5)}}]},{"items":[{{makeItems(6, 5)}}]},{"items":[{{makeItems(11, 5)}}]}]}""";
+        var pipe = ToPipe(json);
+        var path = JsonPath.Root.Property("data"u8).Each().Property("items"u8);
+
+        var output = new ArrayBufferWriter<byte>();
+        using var writer = new Utf8JsonWriter(output);
+
+        int asyncFlushCount = 0;
+        var options = new WriteOptions
+        {
+            FlushThreshold = 100,
+            AsyncFlush = _ =>
+            {
+                asyncFlushCount++;
+                return ValueTask.CompletedTask;
+            },
+        };
+
+        writer.WriteStartArray();
+        var count = await JsonStreamReader.WriteArrayAsync(pipe, path, writer, options);
+        writer.WriteEndArray();
+        writer.Flush();
+
+        count.Should().Be(15);
+        asyncFlushCount.Should().BeGreaterThanOrEqualTo(2);
+
+        var result = JsonDocument.Parse(output.WrittenMemory);
+        result.RootElement.GetArrayLength().Should().Be(15);
+    }
+
     /// <summary>
     /// IBufferWriter that counts how many times Utf8JsonWriter.Flush() commits bytes.
     /// Each Flush() call triggers Advance() with the pending bytes — we count those.

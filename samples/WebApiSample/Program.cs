@@ -34,19 +34,29 @@ app.MapGet(
         ctx.Features.Get<IHttpResponseBodyFeature>()?.DisableBuffering();
 
         var upstream = SimulateUpstream(count);
-        var writer = new Utf8JsonWriter(ctx.Response.BodyWriter);
+        var pipeWriter = ctx.Response.BodyWriter;
+        var writer = new Utf8JsonWriter(pipeWriter);
+        var options = new WriteOptions
+        {
+            AsyncFlush = async ct => { await pipeWriter.FlushAsync(ct); },
+        };
 
         writer.WriteStartObject();
         writer.WriteStartArray("results"u8);
 
-        var itemCount = await JsonStreamReader.WriteArrayAsync(upstream, "results", writer);
+        var itemCount = await JsonStreamReader.WriteArrayAsync(
+            upstream,
+            "results",
+            writer,
+            options
+        );
 
         writer.WriteEndArray();
         writer.WriteNumber("count"u8, itemCount);
         writer.WriteEndObject();
         writer.Flush();
 
-        await ctx.Response.BodyWriter.FlushAsync();
+        await pipeWriter.FlushAsync();
         await upstream.CompleteAsync();
     }
 );

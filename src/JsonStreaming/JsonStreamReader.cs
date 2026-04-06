@@ -170,19 +170,8 @@ public static class JsonStreamReader
     )
     {
         var flushThreshold = (long)(options.FlushThreshold * WriteOptions.FlushRatio);
+        var asyncFlush = options.AsyncFlush;
 
-        // The callback writes to the Utf8JsonWriter, then we check if a flush is needed.
-        // This mirrors System.Text.Json's ShouldFlush pattern:
-        //   flush when BytesCommitted + BytesPending > 90% of threshold
-        int count = 0;
-        var innerCallback = (ReadOnlySequence<byte> itemBytes) =>
-        {
-            writeItem(itemBytes, writer);
-            count++;
-        };
-
-        // We need our own iteration loop (not ProcessArrayAsync) because
-        // we must await FlushAsync between items — can't do that in a sync callback.
         if (JsonPathNavigator.HasEach(path))
         {
             var (prefix, suffix) = JsonPathNavigator.SplitAtEach(path);
@@ -200,6 +189,7 @@ public static class JsonStreamReader
                     writer,
                     writeItem,
                     flushThreshold,
+                    asyncFlush,
                     ct
                 );
             }
@@ -211,6 +201,7 @@ public static class JsonStreamReader
                 writer,
                 writeItem,
                 flushThreshold,
+                asyncFlush,
                 ct
             );
         }
@@ -226,44 +217,10 @@ public static class JsonStreamReader
                 writer,
                 writeItem,
                 flushThreshold,
+                asyncFlush,
                 ct
             );
         }
-    }
-
-    /// <summary>
-    /// Checks if the writer has accumulated enough bytes to warrant a flush.
-    /// Mirrors System.Text.Json's ShouldFlush: BytesCommitted + BytesPending > threshold.
-    /// </summary>
-    private static async ValueTask MaybeFlushAsync(
-        Utf8JsonWriter writer,
-        long flushThreshold,
-        CancellationToken ct
-    )
-    {
-        if (flushThreshold <= 0)
-            return;
-
-        long pending = writer.BytesCommitted + writer.BytesPending;
-        if (pending < flushThreshold)
-            return;
-
-        // Flush the Utf8JsonWriter's internal buffer to the underlying IBufferWriter
-        writer.Flush();
-
-        // If the underlying target is a PipeWriter, FlushAsync provides backpressure.
-        // For ArrayBufferWriter/MemoryStream this is a no-op.
-        // We access the PipeWriter via reflection-free duck typing: the writer's
-        // output target is an IBufferWriter<byte>. We flush by resetting BytesCommitted.
-        // The actual pipe flush must be done by the caller (or we detect PipeWriter).
-
-        // Unfortunately, Utf8JsonWriter doesn't expose its output target.
-        // After Flush(), BytesPending becomes 0 and BytesCommitted reflects total.
-        // The bytes are in the IBufferWriter's buffer — for PipeWriter that means
-        // they're in unflushed pipe segments. We need the caller to flush.
-        //
-        // Solution: accept an optional async flush delegate.
-        await ValueTask.CompletedTask;
     }
 
     // ── Simple iteration with flush ────────────────────────────────────────
@@ -274,6 +231,7 @@ public static class JsonStreamReader
         Utf8JsonWriter writer,
         WriteItemDelegate writeItem,
         long flushThreshold,
+        Func<CancellationToken, ValueTask>? asyncFlush,
         CancellationToken ct
     )
     {
@@ -287,55 +245,68 @@ public static class JsonStreamReader
 
             var readResult = await pipeReader.ReadAsync(ct);
             var buffer = readResult.Buffer;
-            var reader = new Utf8JsonReader(
-                buffer,
-                isFinalBlock: readResult.IsCompleted,
-                jsonState
-            );
+            bool needsFlush = false;
 
-            if (!reader.Read())
+            // Synchronous inner loop — Utf8JsonReader lives only in this scope
             {
-                pipeReader.AdvanceTo(buffer.Start, buffer.End);
-                if (readResult.IsCompleted)
-                    break;
-                continue;
-            }
+                var reader = new Utf8JsonReader(
+                    buffer,
+                    isFinalBlock: readResult.IsCompleted,
+                    jsonState
+                );
 
-            if (reader.TokenType == JsonTokenType.EndArray)
-            {
-                pipeReader.AdvanceTo(reader.Position);
-                break;
-            }
-
-            long itemStart = reader.TokenStartIndex;
-
-            if (reader.TrySkip())
-            {
-                long itemLength = reader.BytesConsumed - itemStart;
-                var itemSlice = buffer.Slice(buffer.GetPosition(itemStart), itemLength);
-
-                writeItem(itemSlice, writer);
-
-                jsonState = reader.CurrentState;
-                pipeReader.AdvanceTo(reader.Position);
-                count++;
-
-                // Check flush threshold — bytes written since last flush
-                long totalWritten = writer.BytesCommitted + writer.BytesPending;
-                if (flushThreshold > 0 && (totalWritten - lastFlushedAt) >= flushThreshold)
+                if (!reader.Read())
                 {
-                    writer.Flush();
-                    lastFlushedAt = writer.BytesCommitted;
+                    pipeReader.AdvanceTo(buffer.Start, buffer.End);
+                    if (readResult.IsCompleted)
+                        break;
+                    continue;
+                }
+
+                if (reader.TokenType == JsonTokenType.EndArray)
+                {
+                    pipeReader.AdvanceTo(reader.Position);
+                    break;
+                }
+
+                long itemStart = reader.TokenStartIndex;
+
+                if (reader.TrySkip())
+                {
+                    long itemLength = reader.BytesConsumed - itemStart;
+                    var itemSlice = buffer.Slice(buffer.GetPosition(itemStart), itemLength);
+
+                    writeItem(itemSlice, writer);
+                    count++;
+
+                    // Checkpoint: save state and advance before potential flush
+                    jsonState = reader.CurrentState;
+                    pipeReader.AdvanceTo(reader.Position, buffer.End);
+
+                    // Check flush threshold
+                    long totalWritten = writer.BytesCommitted + writer.BytesPending;
+                    if (flushThreshold > 0 && (totalWritten - lastFlushedAt) >= flushThreshold)
+                        needsFlush = true;
+                }
+                else if (readResult.IsCompleted)
+                {
+                    pipeReader.AdvanceTo(buffer.End);
+                    break;
+                }
+                else
+                {
+                    pipeReader.AdvanceTo(buffer.Start, buffer.End);
                 }
             }
-            else if (readResult.IsCompleted)
+            // reader is dead here — safe to await
+
+            if (needsFlush)
             {
-                pipeReader.AdvanceTo(buffer.End);
-                break;
-            }
-            else
-            {
-                pipeReader.AdvanceTo(buffer.Start, buffer.End);
+                writer.Flush();
+                lastFlushedAt = writer.BytesCommitted;
+
+                if (asyncFlush is not null)
+                    await asyncFlush(ct);
             }
         }
 
@@ -363,6 +334,7 @@ public static class JsonStreamReader
         Utf8JsonWriter writer,
         WriteItemDelegate writeItem,
         long flushThreshold,
+        Func<CancellationToken, ValueTask>? asyncFlush,
         CancellationToken ct
     )
     {
@@ -381,189 +353,217 @@ public static class JsonStreamReader
 
             var readResult = await pipeReader.ReadAsync(ct);
             var buffer = readResult.Buffer;
-            var reader = new Utf8JsonReader(
-                buffer,
-                isFinalBlock: readResult.IsCompleted,
-                jsonState
-            );
+            bool needsFlush = false;
 
-            while (reader.Read())
+            // Synchronous inner loop — reader lives only in this scope
             {
-                if (phase is EachPhase.NavSuffixSkip or EachPhase.SkipElement)
+                var reader = new Utf8JsonReader(
+                    buffer,
+                    isFinalBlock: readResult.IsCompleted,
+                    jsonState
+                );
+
+                while (reader.Read())
                 {
-                    switch (reader.TokenType)
+                    if (phase is EachPhase.NavSuffixSkip or EachPhase.SkipElement)
                     {
-                        case JsonTokenType.StartObject:
-                        case JsonTokenType.StartArray:
-                            skipDepth++;
-                            break;
-                        case JsonTokenType.EndObject:
-                        case JsonTokenType.EndArray:
-                            if (--skipDepth <= 0)
-                            {
-                                skipDepth = 0;
-                                if (phase == EachPhase.SkipElement)
+                        switch (reader.TokenType)
+                        {
+                            case JsonTokenType.StartObject:
+                            case JsonTokenType.StartArray:
+                                skipDepth++;
+                                break;
+                            case JsonTokenType.EndObject:
+                            case JsonTokenType.EndArray:
+                                if (--skipDepth <= 0)
+                                {
+                                    skipDepth = 0;
+                                    if (phase == EachPhase.SkipElement)
+                                    {
+                                        elementDepth--;
+                                        if (elementDepth <= 0)
+                                        {
+                                            phase = EachPhase.InOuterArray;
+                                            suffixIndex = 0;
+                                        }
+                                    }
+                                    else
+                                    {
+                                        phase = returnPhase;
+                                    }
+                                }
+                                else if (phase == EachPhase.SkipElement)
                                 {
                                     elementDepth--;
                                     if (elementDepth <= 0)
                                     {
+                                        skipDepth = 0;
                                         phase = EachPhase.InOuterArray;
                                         suffixIndex = 0;
                                     }
                                 }
+                                break;
+                            default:
+                                if (skipDepth == 0)
+                                {
+                                    if (phase == EachPhase.SkipElement)
+                                    {
+                                        phase = EachPhase.InOuterArray;
+                                        suffixIndex = 0;
+                                    }
+                                    else
+                                    {
+                                        phase = returnPhase;
+                                    }
+                                }
+                                break;
+                        }
+                        continue;
+                    }
+
+                    switch (phase)
+                    {
+                        case EachPhase.InOuterArray:
+                            if (reader.TokenType == JsonTokenType.EndArray)
+                            {
+                                phase = EachPhase.Done;
+                            }
+                            else if (reader.TokenType == JsonTokenType.StartObject)
+                            {
+                                suffixIndex = 0;
+                                elementDepth = 1;
+                                phase = EachPhase.NavSuffixSearch;
+                            }
+                            break;
+
+                        case EachPhase.NavSuffixSearch:
+                            if (reader.TokenType == JsonTokenType.PropertyName)
+                            {
+                                if (reader.ValueTextEquals(suffixNames[suffixIndex]))
+                                {
+                                    if (suffixIndex == suffixNames.Length - 1)
+                                        phase = EachPhase.ExpectInnerArray;
+                                    else
+                                    {
+                                        suffixIndex++;
+                                        phase = EachPhase.NavSuffixExpectObj;
+                                    }
+                                }
                                 else
                                 {
-                                    phase = returnPhase;
+                                    phase = EachPhase.NavSuffixSkip;
+                                    returnPhase = EachPhase.NavSuffixSearch;
+                                    skipDepth = 0;
                                 }
                             }
-                            else if (phase == EachPhase.SkipElement)
+                            else if (reader.TokenType == JsonTokenType.EndObject)
                             {
                                 elementDepth--;
                                 if (elementDepth <= 0)
                                 {
-                                    skipDepth = 0;
                                     phase = EachPhase.InOuterArray;
                                     suffixIndex = 0;
                                 }
                             }
                             break;
-                        default:
-                            if (skipDepth == 0)
+
+                        case EachPhase.NavSuffixExpectObj:
+                            if (reader.TokenType == JsonTokenType.StartObject)
                             {
-                                if (phase == EachPhase.SkipElement)
+                                elementDepth++;
+                                phase = EachPhase.NavSuffixSearch;
+                            }
+                            else
+                            {
+                                phase = EachPhase.SkipElement;
+                                skipDepth = 0;
+                            }
+                            break;
+
+                        case EachPhase.ExpectInnerArray:
+                            if (reader.TokenType == JsonTokenType.StartArray)
+                            {
+                                phase = EachPhase.InInnerArray;
+                            }
+                            else
+                            {
+                                phase = EachPhase.SkipElement;
+                                skipDepth = 0;
+                            }
+                            break;
+
+                        case EachPhase.InInnerArray:
+                            if (reader.TokenType == JsonTokenType.EndArray)
+                            {
+                                phase = EachPhase.SkipElement;
+                                skipDepth = 0;
+                            }
+                            else
+                            {
+                                long itemStart = reader.TokenStartIndex;
+                                if (reader.TrySkip())
                                 {
-                                    phase = EachPhase.InOuterArray;
-                                    suffixIndex = 0;
+                                    long itemLength = reader.BytesConsumed - itemStart;
+                                    var itemSlice = buffer.Slice(
+                                        buffer.GetPosition(itemStart),
+                                        itemLength
+                                    );
+                                    writeItem(itemSlice, writer);
+                                    count++;
+
+                                    // Check flush — checkpoint and break if needed
+                                    long totalWritten =
+                                        writer.BytesCommitted + writer.BytesPending;
+                                    if (
+                                        flushThreshold > 0
+                                        && (totalWritten - lastFlushedAt) >= flushThreshold
+                                    )
+                                    {
+                                        jsonState = reader.CurrentState;
+                                        pipeReader.AdvanceTo(reader.Position, buffer.End);
+                                        needsFlush = true;
+                                        goto afterInnerLoop;
+                                    }
                                 }
                                 else
                                 {
-                                    phase = returnPhase;
+                                    // Incomplete item — need more data
+                                    jsonState = reader.CurrentState;
+                                    pipeReader.AdvanceTo(
+                                        buffer.GetPosition(itemStart),
+                                        buffer.End
+                                    );
+                                    goto afterInnerLoop;
                                 }
                             }
                             break;
                     }
-                    continue;
-                }
 
-                switch (phase)
-                {
-                    case EachPhase.InOuterArray:
-                        if (reader.TokenType == JsonTokenType.EndArray)
-                        {
-                            phase = EachPhase.Done;
-                        }
-                        else if (reader.TokenType == JsonTokenType.StartObject)
-                        {
-                            suffixIndex = 0;
-                            elementDepth = 1;
-                            phase = EachPhase.NavSuffixSearch;
-                        }
-                        break;
-
-                    case EachPhase.NavSuffixSearch:
-                        if (reader.TokenType == JsonTokenType.PropertyName)
-                        {
-                            if (reader.ValueTextEquals(suffixNames[suffixIndex]))
-                            {
-                                if (suffixIndex == suffixNames.Length - 1)
-                                    phase = EachPhase.ExpectInnerArray;
-                                else
-                                {
-                                    suffixIndex++;
-                                    phase = EachPhase.NavSuffixExpectObj;
-                                }
-                            }
-                            else
-                            {
-                                phase = EachPhase.NavSuffixSkip;
-                                returnPhase = EachPhase.NavSuffixSearch;
-                                skipDepth = 0;
-                            }
-                        }
-                        else if (reader.TokenType == JsonTokenType.EndObject)
-                        {
-                            elementDepth--;
-                            if (elementDepth <= 0)
-                            {
-                                phase = EachPhase.InOuterArray;
-                                suffixIndex = 0;
-                            }
-                        }
-                        break;
-
-                    case EachPhase.NavSuffixExpectObj:
-                        if (reader.TokenType == JsonTokenType.StartObject)
-                        {
-                            elementDepth++;
-                            phase = EachPhase.NavSuffixSearch;
-                        }
-                        else
-                        {
-                            phase = EachPhase.SkipElement;
-                            skipDepth = 0;
-                        }
-                        break;
-
-                    case EachPhase.ExpectInnerArray:
-                        if (reader.TokenType == JsonTokenType.StartArray)
-                        {
-                            phase = EachPhase.InInnerArray;
-                        }
-                        else
-                        {
-                            phase = EachPhase.SkipElement;
-                            skipDepth = 0;
-                        }
-                        break;
-
-                    case EachPhase.InInnerArray:
-                        if (reader.TokenType == JsonTokenType.EndArray)
-                        {
-                            phase = EachPhase.SkipElement;
-                            skipDepth = 0;
-                        }
-                        else
-                        {
-                            long itemStart = reader.TokenStartIndex;
-                            if (reader.TrySkip())
-                            {
-                                long itemLength = reader.BytesConsumed - itemStart;
-                                var itemSlice = buffer.Slice(
-                                    buffer.GetPosition(itemStart),
-                                    itemLength
-                                );
-                                writeItem(itemSlice, writer);
-                                count++;
-
-                                // Check flush threshold
-                                long totalWritten = writer.BytesCommitted + writer.BytesPending;
-                                if (
-                                    flushThreshold > 0
-                                    && (totalWritten - lastFlushedAt) >= flushThreshold
-                                )
-                                {
-                                    writer.Flush();
-                                    lastFlushedAt = writer.BytesCommitted;
-                                }
-                            }
-                            else
-                            {
-                                jsonState = reader.CurrentState;
-                                pipeReader.AdvanceTo(buffer.GetPosition(itemStart), buffer.End);
-                                goto continueOuter;
-                            }
-                        }
+                    if (phase == EachPhase.Done)
                         break;
                 }
 
-                if (phase == EachPhase.Done)
-                    break;
+                // Normal exit from inner loop — save state
+                jsonState = reader.CurrentState;
+                pipeReader.AdvanceTo(reader.Position, buffer.End);
             }
 
-            jsonState = reader.CurrentState;
-            pipeReader.AdvanceTo(reader.Position, buffer.End);
+            afterInnerLoop:
+            // reader is dead here — safe to await
 
-            continueOuter:
+            if (needsFlush)
+            {
+                writer.Flush();
+                lastFlushedAt = writer.BytesCommitted;
+
+                if (asyncFlush is not null)
+                    await asyncFlush(ct);
+
+                // After flush, always continue — there may be more items
+                // in the pipe even if the previous ReadResult.IsCompleted was true
+                continue;
+            }
+
             if (readResult.IsCompleted && phase != EachPhase.Done)
                 break;
         }
@@ -893,7 +893,7 @@ public delegate void WriteItemDelegate(ReadOnlySequence<byte> itemBytes, Utf8Jso
 public sealed class WriteOptions
 {
     /// <summary>
-    /// Default options: flush at 16KB, matching System.Text.Json's default buffer size.
+    /// Default options: flush at 16KB, no async flush callback.
     /// </summary>
     public static WriteOptions Default { get; } = new();
 
@@ -904,6 +904,24 @@ public sealed class WriteOptions
     /// Default: 16384 (16KB).
     /// </summary>
     public int FlushThreshold { get; init; } = 16_384;
+
+    /// <summary>
+    /// Optional async flush callback invoked after <see cref="Utf8JsonWriter.Flush"/>
+    /// when the threshold is exceeded. This is where backpressure happens.
+    ///
+    /// For HTTP streaming, set this to flush the underlying PipeWriter:
+    /// <code>
+    /// var options = new WriteOptions
+    /// {
+    ///     AsyncFlush = async ct => { await pipeWriter.FlushAsync(ct); }
+    /// };
+    /// </code>
+    ///
+    /// The iteration loop breaks out of the synchronous parsing loop (destroying
+    /// the ref struct Utf8JsonReader), awaits this callback, then reconstructs
+    /// the reader from saved JsonReaderState to continue where it left off.
+    /// </summary>
+    public Func<CancellationToken, ValueTask>? AsyncFlush { get; init; }
 
     /// <summary>
     /// Matches System.Text.Json's FlushThreshold ratio.
