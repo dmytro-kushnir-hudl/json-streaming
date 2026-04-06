@@ -87,8 +87,10 @@ public static class JsonStreamReader
             writer,
             static (itemBytes, w) =>
             {
-                using var doc = JsonDocument.Parse(itemBytes);
-                doc.RootElement.WriteTo(w);
+                if (itemBytes.IsSingleSegment)
+                    w.WriteRawValue(itemBytes.FirstSpan, skipInputValidation: true);
+                else
+                    w.WriteRawValue(itemBytes.ToArray(), skipInputValidation: true);
             },
             options,
             ct
@@ -296,7 +298,10 @@ public static class JsonStreamReader
                 if (reader.TrySkip())
                 {
                     long itemLength = reader.BytesConsumed - itemStart;
-                    var itemSlice = buffer.Slice(buffer.GetPosition(itemStart), itemLength);
+                    var itemSlice = buffer.Slice(
+                        buffer.GetPosition(itemStart),
+                        itemLength
+                    );
 
                     long bytesBeforeWrite = writer.BytesCommitted + writer.BytesPending;
                     writeItem(itemSlice, writer);
@@ -689,7 +694,7 @@ public static class JsonStreamReader
                 processItem(itemSlice);
 
                 jsonState = reader.CurrentState;
-                pipeReader.AdvanceTo(reader.Position);
+                pipeReader.AdvanceTo(reader.Position, buffer.End);
                 count++;
             }
             else if (readResult.IsCompleted)
