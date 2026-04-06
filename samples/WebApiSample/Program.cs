@@ -2,6 +2,7 @@ using System.Buffers;
 using System.IO.Pipelines;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Text.Json.Serialization.Metadata;
 using JsonStreaming;
 using Microsoft.AspNetCore.Http.Features;
 
@@ -296,7 +297,9 @@ app.MapGet(
 // Works with: fetch + ReadableStream, curl --no-buffer, EventSource polyfills.
 // ════════════════════════════════════════════════════════════════════════
 
-// NDJSON transform — one product per line, transformed shape.
+// NDJSON transform — one product per line with trailer for error/completion signal.
+// The trailer is the last line: {"__status":"complete","count":N} or {"__status":"error",...}
+// Clients: read lines, check __status field to detect end-of-stream and errors.
 app.MapGet(
     "/ndjson/products",
     async (HttpContext ctx, IHttpClientFactory httpFactory, CancellationToken ct, int limit = 100) =>
@@ -311,50 +314,65 @@ app.MapGet(
         );
 
         var output = ctx.Response.BodyWriter;
-        byte[] newline = [(byte)'\n'];
+        int count = 0;
 
-        await JsonStreamReader.ProcessArrayAsync(
-            upstream.Pipe,
-            "products",
-            itemBytes =>
-            {
-                var reader = new Utf8JsonReader(itemBytes);
-                var product = JsonSerializer.Deserialize(
-                    ref reader,
-                    SampleJsonContext.Default.ProductInput
-                );
-                if (product is null)
-                    return;
-
-                var line = new ProductOutput
+        try
+        {
+            await JsonStreamReader.ProcessArrayAsync(
+                upstream.Pipe,
+                "products",
+                itemBytes =>
                 {
-                    Id = product.Id,
-                    Title = product.Title,
-                    Brand = product.Brand ?? "Unknown",
-                    OriginalPrice = product.Price,
-                    SalePrice = Math.Round(
-                        product.Price * (1 - product.DiscountPercentage / 100),
-                        2
-                    ),
-                    Rating = product.Rating,
-                    InStock = product.Id % 2 == 0,
-                };
+                    var reader = new Utf8JsonReader(itemBytes);
+                    var product = JsonSerializer.Deserialize(
+                        ref reader,
+                        SampleJsonContext.Default.ProductInput
+                    );
+                    if (product is null)
+                        return;
 
-                // Write one JSON object per line — no array wrapper
-                var buf = new ArrayBufferWriter<byte>();
-                using (var lw = new Utf8JsonWriter(buf))
-                    JsonSerializer.Serialize(lw, line, SampleJsonContext.Default.ProductOutput);
-                output.Write(buf.WrittenSpan);
-                output.Write(newline);
-            },
-            ct
-        );
+                    var line = new ProductOutput
+                    {
+                        Id = product.Id,
+                        Title = product.Title,
+                        Brand = product.Brand ?? "Unknown",
+                        OriginalPrice = product.Price,
+                        SalePrice = Math.Round(
+                            product.Price * (1 - product.DiscountPercentage / 100),
+                            2
+                        ),
+                        Rating = product.Rating,
+                        InStock = product.Id % 2 == 0,
+                    };
+
+                    output.WriteNdjsonLine(line, SampleJsonContext.Default.ProductOutput);
+                    count++;
+                },
+                ct
+            );
+
+            output.WriteNdjsonLine(
+                new NdjsonTrailer { Status = "complete", Count = count },
+                SampleJsonContext.Default.NdjsonTrailer
+            );
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // Client disconnected — no trailer possible
+        }
+        catch (Exception ex)
+        {
+            output.WriteNdjsonLine(
+                new NdjsonTrailer { Status = "error", Count = count, Error = ex.Message },
+                SampleJsonContext.Default.NdjsonTrailer
+            );
+        }
 
         await output.FlushAsync(ct);
     }
 );
 
-// NDJSON passthrough — verbatim items, one per line. Simplest possible.
+// NDJSON passthrough with trailer — verbatim items, one per line.
 app.MapGet(
     "/ndjson/comments",
     async (HttpContext ctx, IHttpClientFactory httpFactory, CancellationToken ct) =>
@@ -369,23 +387,43 @@ app.MapGet(
         );
 
         var output = ctx.Response.BodyWriter;
-        byte[] newline = [(byte)'\n'];
+        int count = 0;
 
-        await JsonStreamReader.ProcessArrayAsync(
-            upstream.Pipe,
-            JsonPath.Root,
-            itemBytes =>
-            {
-                // Re-serialize compact — upstream may be pretty-printed
-                using var doc = JsonDocument.Parse(itemBytes);
-                var buf = new ArrayBufferWriter<byte>();
-                using (var lw = new Utf8JsonWriter(buf))
-                    doc.RootElement.WriteTo(lw);
-                output.Write(buf.WrittenSpan);
-                output.Write(newline);
-            },
-            ct
-        );
+        try
+        {
+            await JsonStreamReader.ProcessArrayAsync(
+                upstream.Pipe,
+                JsonPath.Root,
+                itemBytes =>
+                {
+                    // Re-serialize compact — upstream may be pretty-printed
+                    using var doc = JsonDocument.Parse(itemBytes);
+                    var buf = new ArrayBufferWriter<byte>();
+                    using (var lw = new Utf8JsonWriter(buf))
+                        doc.RootElement.WriteTo(lw);
+                    output.Write(buf.WrittenSpan);
+                    output.Write([(byte)'\n']);
+                    count++;
+                },
+                ct
+            );
+
+            output.WriteNdjsonLine(
+                new NdjsonTrailer { Status = "complete", Count = count },
+                SampleJsonContext.Default.NdjsonTrailer
+            );
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            // Client disconnected
+        }
+        catch (Exception ex)
+        {
+            output.WriteNdjsonLine(
+                new NdjsonTrailer { Status = "error", Count = count, Error = ex.Message },
+                SampleJsonContext.Default.NdjsonTrailer
+            );
+        }
 
         await output.FlushAsync(ct);
     }
@@ -624,6 +662,27 @@ static class HttpContextExtensions
     }
 }
 
+static class PipeWriterNdjsonExtensions
+{
+    private static readonly byte[] Newline = [(byte)'\n'];
+
+    /// <summary>
+    /// Serialize a value as a single NDJSON line (compact JSON + newline).
+    /// </summary>
+    public static void WriteNdjsonLine<T>(
+        this PipeWriter output,
+        T value,
+        JsonTypeInfo<T> typeInfo
+    )
+    {
+        var buf = new ArrayBufferWriter<byte>();
+        using (var w = new Utf8JsonWriter(buf))
+            JsonSerializer.Serialize(w, value, typeInfo);
+        output.Write(buf.WrittenSpan);
+        output.Write(Newline);
+    }
+}
+
 sealed class UpstreamPipe(PipeReader pipe, HttpClient http, HttpResponseMessage response)
     : IAsyncDisposable
 {
@@ -661,6 +720,19 @@ public sealed record ProductOutput
     public bool InStock { get; init; }
 }
 
+/// <summary>
+/// NDJSON trailer — always the last line. Clients check for __status field
+/// to distinguish data lines from the completion/error signal.
+/// </summary>
+public sealed record NdjsonTrailer
+{
+    [JsonPropertyName("__status")]
+    public string Status { get; init; } = "";
+
+    public int Count { get; init; }
+    public string? Error { get; init; }
+}
+
 public sealed record Photo
 {
     public int AlbumId { get; init; }
@@ -677,4 +749,5 @@ public sealed record Photo
 [JsonSerializable(typeof(ProductInput))]
 [JsonSerializable(typeof(ProductOutput))]
 [JsonSerializable(typeof(Photo))]
+[JsonSerializable(typeof(NdjsonTrailer))]
 public partial class SampleJsonContext : JsonSerializerContext;
