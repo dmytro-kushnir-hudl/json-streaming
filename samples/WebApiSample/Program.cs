@@ -13,6 +13,7 @@ app.MapGet(
     "/stream/comments",
     async (HttpContext ctx, IHttpClientFactory httpFactory) =>
     {
+        var ct = ctx.RequestAborted;
         ctx.Response.ContentType = "application/json";
         ctx.Features.Get<IHttpResponseBodyFeature>()?.DisableBuffering();
 
@@ -22,16 +23,20 @@ app.MapGet(
                 HttpMethod.Get,
                 "https://jsonplaceholder.typicode.com/comments"
             ),
-            HttpCompletionOption.ResponseHeadersRead
+            HttpCompletionOption.ResponseHeadersRead,
+            ct
         );
-        await using var stream = await upstream.Content.ReadAsStreamAsync();
+        await using var stream = await upstream.Content.ReadAsStreamAsync(ct);
         var pipe = PipeReader.Create(stream, new StreamPipeReaderOptions(bufferSize: 8192));
 
         var pipeWriter = ctx.Response.BodyWriter;
         await using var writer = new Utf8JsonWriter(pipeWriter);
         var options = new WriteOptions
         {
-            AsyncFlush = async ct => { await pipeWriter.FlushAsync(ct); },
+            AsyncFlush = async flushCt =>
+            {
+                await pipeWriter.FlushAsync(flushCt);
+            },
         };
 
         writer.WriteStartObject();
@@ -39,9 +44,10 @@ app.MapGet(
 
         var count = await JsonStreamReader.WriteArrayAsync(
             pipe,
-            JsonPath.Root, // root-level array
+            JsonPath.Root,
             writer,
-            options
+            options,
+            ct
         );
 
         writer.WriteEndArray();
@@ -49,7 +55,7 @@ app.MapGet(
         writer.WriteEndObject();
         writer.Flush();
 
-        await pipeWriter.FlushAsync();
+        await pipeWriter.FlushAsync(ct);
         await pipe.CompleteAsync();
     }
 );
@@ -58,8 +64,9 @@ app.MapGet(
 // Nested array at $.products. Transform: keep only id, title, price, rating.
 app.MapGet(
     "/stream/products",
-    async Task (HttpContext ctx, IHttpClientFactory httpFactory, int limit = 100) =>
+    async (HttpContext ctx, IHttpClientFactory httpFactory, int limit = 100) =>
     {
+        var ct = ctx.RequestAborted;
         ctx.Response.ContentType = "application/json";
         ctx.Features.Get<IHttpResponseBodyFeature>()?.DisableBuffering();
 
@@ -69,16 +76,20 @@ app.MapGet(
                 HttpMethod.Get,
                 $"https://dummyjson.com/products?limit={limit}"
             ),
-            HttpCompletionOption.ResponseHeadersRead
+            HttpCompletionOption.ResponseHeadersRead,
+            ct
         );
-        var stream = await upstream.Content.ReadAsStreamAsync();
+        await using var stream = await upstream.Content.ReadAsStreamAsync(ct);
         var pipe = PipeReader.Create(stream, new StreamPipeReaderOptions(bufferSize: 8192));
 
         var pipeWriter = ctx.Response.BodyWriter;
         await using var writer = new Utf8JsonWriter(pipeWriter);
         var options = new WriteOptions
         {
-            AsyncFlush = async ct => { await pipeWriter.FlushAsync(ct); },
+            AsyncFlush = async flushCt =>
+            {
+                await pipeWriter.FlushAsync(flushCt);
+            },
         };
 
         writer.WriteStartObject();
@@ -100,7 +111,8 @@ app.MapGet(
                 w.WriteNumber("rating"u8, root.GetProperty("rating").GetDouble());
                 w.WriteEndObject();
             },
-            options
+            options,
+            ct
         );
 
         writer.WriteEndArray();
@@ -108,7 +120,7 @@ app.MapGet(
         writer.WriteEndObject();
         writer.Flush();
 
-        await pipeWriter.FlushAsync();
+        await pipeWriter.FlushAsync(ct);
         await pipe.CompleteAsync();
     }
 );
@@ -120,6 +132,7 @@ app.MapGet(
     "/stream/photos",
     async (HttpContext ctx, IHttpClientFactory httpFactory, int albumId = 1) =>
     {
+        var ct = ctx.RequestAborted;
         ctx.Response.ContentType = "application/json";
         ctx.Features.Get<IHttpResponseBodyFeature>()?.DisableBuffering();
 
@@ -129,16 +142,20 @@ app.MapGet(
                 HttpMethod.Get,
                 "https://jsonplaceholder.typicode.com/photos"
             ),
-            HttpCompletionOption.ResponseHeadersRead
+            HttpCompletionOption.ResponseHeadersRead,
+            ct
         );
-        var stream = await upstream.Content.ReadAsStreamAsync();
+        await using var stream = await upstream.Content.ReadAsStreamAsync(ct);
         var pipe = PipeReader.Create(stream, new StreamPipeReaderOptions(bufferSize: 8192));
 
         var pipeWriter = ctx.Response.BodyWriter;
         await using var writer = new Utf8JsonWriter(pipeWriter);
         var options = new WriteOptions
         {
-            AsyncFlush = async ct => { await pipeWriter.FlushAsync(ct); },
+            AsyncFlush = async flushCt =>
+            {
+                await pipeWriter.FlushAsync(flushCt);
+            },
         };
 
         writer.WriteStartObject();
@@ -158,7 +175,8 @@ app.MapGet(
                     written++;
                 }
             },
-            options
+            options,
+            ct
         );
 
         writer.WriteEndArray();
@@ -166,58 +184,71 @@ app.MapGet(
         writer.WriteEndObject();
         writer.Flush();
 
-        await pipeWriter.FlushAsync();
+        await pipeWriter.FlushAsync(ct);
         await pipe.CompleteAsync();
     }
 );
 
-// ── GET /stream/todos — stream todos, select-many across pages ─────────
-// Simulates paginated upstream by fetching multiple pages and flattening.
+// ── GET /stream/todos — stream todos across multiple pages ─────────────
+// Fetches 3 pages from DummyJSON sequentially, streaming each page's
+// $.todos array directly to the client. No buffering of full pages.
 app.MapGet(
     "/stream/todos",
-    async Task (HttpContext ctx, IHttpClientFactory httpFactory) =>
+    async (HttpContext ctx, IHttpClientFactory httpFactory) =>
     {
+        var ct = ctx.RequestAborted;
         ctx.Response.ContentType = "application/json";
         ctx.Features.Get<IHttpResponseBodyFeature>()?.DisableBuffering();
 
-        // Fetch 3 pages from DummyJSON and wrap into a select-many structure
-        using var http = httpFactory.CreateClient();
-        var pages = new List<string>();
-        for (int skip = 0; skip < 90; skip += 30)
-        {
-            var resp = await http.GetStringAsync(
-                $"https://dummyjson.com/todos?limit=30&skip={skip}"
-            );
-            pages.Add(resp);
-        }
-
-        // Build a wrapper: {"pages":[{page1},{page2},{page3}]}
-        var combined = $$"""{"pages":[{{string.Join(",", pages)}}]}""";
-        var pipe = PipeReader.Create(
-            new MemoryStream(System.Text.Encoding.UTF8.GetBytes(combined)),
-            new StreamPipeReaderOptions(bufferSize: 8192)
-        );
-
-        var path = JsonPath.Root.Property("pages"u8).Each().Property("todos"u8);
         var pipeWriter = ctx.Response.BodyWriter;
         await using var writer = new Utf8JsonWriter(pipeWriter);
         var options = new WriteOptions
         {
-            AsyncFlush = async ct => { await pipeWriter.FlushAsync(ct); },
+            AsyncFlush = async flushCt =>
+            {
+                await pipeWriter.FlushAsync(flushCt);
+            },
         };
 
         writer.WriteStartObject();
         writer.WriteStartArray("todos"u8);
 
-        var count = await JsonStreamReader.WriteArrayAsync(pipe, path, writer, options);
+        using var http = httpFactory.CreateClient();
+        int totalCount = 0;
+
+        for (int skip = 0; skip < 90; skip += 30)
+        {
+            using var upstream = await http.SendAsync(
+                new HttpRequestMessage(
+                    HttpMethod.Get,
+                    $"https://dummyjson.com/todos?limit=30&skip={skip}"
+                ),
+                HttpCompletionOption.ResponseHeadersRead,
+                ct
+            );
+            await using var stream = await upstream.Content.ReadAsStreamAsync(ct);
+            var pipe = PipeReader.Create(
+                stream,
+                new StreamPipeReaderOptions(bufferSize: 8192)
+            );
+
+            totalCount += await JsonStreamReader.WriteArrayAsync(
+                pipe,
+                "todos",
+                writer,
+                options,
+                ct
+            );
+
+            await pipe.CompleteAsync();
+        }
 
         writer.WriteEndArray();
-        writer.WriteNumber("count"u8, count);
+        writer.WriteNumber("count"u8, totalCount);
         writer.WriteEndObject();
         writer.Flush();
 
-        await pipeWriter.FlushAsync();
-        await pipe.CompleteAsync();
+        await pipeWriter.FlushAsync(ct);
     }
 );
 
