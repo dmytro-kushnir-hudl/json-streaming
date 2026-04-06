@@ -158,6 +158,26 @@ public static class JsonStreamReader
             ct
         );
 
+    /// <summary>
+    /// Convenience overload: dot-separated path string + transform + explicit options.
+    /// </summary>
+    public static Task<int> WriteArrayAsync(
+        PipeReader pipeReader,
+        string path,
+        Utf8JsonWriter writer,
+        WriteItemDelegate writeItem,
+        WriteOptions options,
+        CancellationToken ct = default
+    ) =>
+        WriteArrayAsync(
+            pipeReader,
+            JsonPathNavigator.ParseDotPath(path),
+            writer,
+            writeItem,
+            options,
+            ct
+        );
+
     // ── Write-through core (with flush) ────────────────────────────────────
 
     private static async Task<int> WriteArrayCoreAsync(
