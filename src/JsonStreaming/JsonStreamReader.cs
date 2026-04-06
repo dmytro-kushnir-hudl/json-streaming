@@ -24,6 +24,8 @@ namespace JsonStreaming;
 /// </summary>
 public static class JsonStreamReader
 {
+    private const string IncompleteJsonMessage = "Incomplete or malformed JSON while streaming array items.";
+
     // ── Callback API (zero-copy) ───────────────────────────────────────────
 
     /// <summary>
@@ -296,8 +298,11 @@ public static class JsonStreamReader
                     long itemLength = reader.BytesConsumed - itemStart;
                     var itemSlice = buffer.Slice(buffer.GetPosition(itemStart), itemLength);
 
+                    long bytesBeforeWrite = writer.BytesCommitted + writer.BytesPending;
                     writeItem(itemSlice, writer);
-                    count++;
+                    long bytesAfterWrite = writer.BytesCommitted + writer.BytesPending;
+                    if (bytesAfterWrite > bytesBeforeWrite)
+                        count++;
 
                     // Checkpoint: save state and advance before potential flush
                     jsonState = reader.CurrentState;
@@ -311,7 +316,7 @@ public static class JsonStreamReader
                 else if (readResult.IsCompleted)
                 {
                     pipeReader.AdvanceTo(buffer.End);
-                    break;
+                    throw new JsonException(IncompleteJsonMessage);
                 }
                 else
                 {
@@ -528,8 +533,13 @@ public static class JsonStreamReader
                                         buffer.GetPosition(itemStart),
                                         itemLength
                                     );
+                                    long bytesBeforeWrite =
+                                        writer.BytesCommitted + writer.BytesPending;
                                     writeItem(itemSlice, writer);
-                                    count++;
+                                    long bytesAfterWrite =
+                                        writer.BytesCommitted + writer.BytesPending;
+                                    if (bytesAfterWrite > bytesBeforeWrite)
+                                        count++;
 
                                     // Check flush — checkpoint and break if needed
                                     long totalWritten =
@@ -585,7 +595,7 @@ public static class JsonStreamReader
             }
 
             if (readResult.IsCompleted && phase != EachPhase.Done)
-                break;
+                throw new JsonException(IncompleteJsonMessage);
         }
 
         return count;
@@ -659,7 +669,7 @@ public static class JsonStreamReader
             {
                 pipeReader.AdvanceTo(buffer.Start, buffer.End);
                 if (readResult.IsCompleted)
-                    break;
+                    throw new JsonException(IncompleteJsonMessage);
                 continue;
             }
 
@@ -685,7 +695,7 @@ public static class JsonStreamReader
             else if (readResult.IsCompleted)
             {
                 pipeReader.AdvanceTo(buffer.End);
-                break;
+                throw new JsonException(IncompleteJsonMessage);
             }
             else
             {
@@ -891,7 +901,7 @@ public static class JsonStreamReader
 
             continueOuter:
             if (readResult.IsCompleted && phase != EachPhase.Done)
-                break;
+                throw new JsonException(IncompleteJsonMessage);
         }
 
         return count;

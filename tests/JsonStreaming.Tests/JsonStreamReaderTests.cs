@@ -247,6 +247,29 @@ public class JsonStreamReaderTests
         count.Should().Be(2);
     }
 
+    [Fact]
+    public async Task ProcessArray_TruncatedJson_ThrowsJsonException()
+    {
+        var pipe = ToPipe("""{"items":[1,2""");
+
+        var act = async () => await JsonStreamReader.ProcessArrayAsync(pipe, "items", _ => { });
+
+        await act.Should().ThrowAsync<JsonException>();
+    }
+
+    [Fact]
+    public async Task WriteArray_TruncatedJson_ThrowsJsonException()
+    {
+        var pipe = ToPipe("""{"items":[{"id":1},{"id":2}""");
+        var output = new ArrayBufferWriter<byte>();
+        using var writer = new Utf8JsonWriter(output);
+
+        writer.WriteStartArray();
+        var act = async () => await JsonStreamReader.WriteArrayAsync(pipe, "items", writer);
+
+        await act.Should().ThrowAsync<JsonException>();
+    }
+
     // ── Each() / select-many ───────────────────────────────────────────────
 
     [Fact]

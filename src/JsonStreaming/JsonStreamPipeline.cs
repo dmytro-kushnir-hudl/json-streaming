@@ -147,10 +147,16 @@ public static class JsonStreamPipeline
             writer.WriteStartObject();
             writer.WriteStartArray(outputArrayName);
 
-            written = await JsonStreamReader.WriteArrayAsync(
+            await JsonStreamReader.WriteArrayAsync(
                 input,
                 sourcePath,
                 writer,
+                (itemBytes, w) =>
+                {
+                    using var doc = JsonDocument.Parse(itemBytes);
+                    doc.RootElement.WriteTo(w);
+                    written++;
+                },
                 options,
                 ct
             );
@@ -207,10 +213,16 @@ public static class JsonStreamPipeline
             writer.WriteStartObject();
             writer.WriteStartArray(outputArrayName);
 
-            written = await JsonStreamReader.WriteArrayAsync(
+            await JsonStreamReader.WriteArrayAsync(
                 input,
                 sourcePath,
                 writer,
+                (itemBytes, w) =>
+                {
+                    using var doc = JsonDocument.Parse(itemBytes);
+                    doc.RootElement.WriteTo(w);
+                    written++;
+                },
                 options,
                 ct
             );
@@ -243,11 +255,11 @@ public static class JsonStreamPipeline
     {
         for (int i = 0; i < 10 && writer.CurrentDepth > 1; i++)
         {
-            try { writer.WriteNullValue(); continue; }
+            try { writer.WriteEndArray(); continue; }
             catch (InvalidOperationException) { }
             try { writer.WriteEndObject(); continue; }
             catch (InvalidOperationException) { }
-            try { writer.WriteEndArray(); continue; }
+            try { writer.WriteNullValue(); continue; }
             catch (InvalidOperationException) { }
             break;
         }
