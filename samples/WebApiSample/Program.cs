@@ -1,5 +1,6 @@
 using System.IO.Pipelines;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using JsonStreaming;
 using Microsoft.AspNetCore.Http.Features;
 
@@ -60,8 +61,9 @@ app.MapGet(
     }
 );
 
-// ── GET /stream/products — stream products from DummyJSON ──────────────
-// Nested array at $.products. Transform: keep only id, title, price, rating.
+// ── GET /stream/products — typed deserialization + business logic ───────
+// Uses source-generated JsonSerializer for zero-reflection deserialization,
+// computes a discounted price, and serializes a different output shape.
 app.MapGet(
     "/stream/products",
     async (HttpContext ctx, IHttpClientFactory httpFactory, int limit = 100) =>
@@ -101,15 +103,33 @@ app.MapGet(
             writer,
             (itemBytes, w) =>
             {
-                using var doc = JsonDocument.Parse(itemBytes);
-                var root = doc.RootElement;
+                // Deserialize into typed record via source generator — no reflection
+                var reader = new Utf8JsonReader(itemBytes);
+                var product = JsonSerializer.Deserialize(
+                    ref reader,
+                    SampleJsonContext.Default.ProductInput
+                );
+                if (product is null)
+                    return;
 
-                w.WriteStartObject();
-                w.WriteNumber("id"u8, root.GetProperty("id").GetInt32());
-                w.WriteString("title"u8, root.GetProperty("title").GetString());
-                w.WriteNumber("price"u8, root.GetProperty("price").GetDouble());
-                w.WriteNumber("rating"u8, root.GetProperty("rating").GetDouble());
-                w.WriteEndObject();
+                // Business logic: compute sale price
+                var salePrice = Math.Round(
+                    product.Price * (1 - product.DiscountPercentage / 100),
+                    2
+                );
+
+                // Serialize a different output shape via source generator
+                var output = new ProductOutput
+                {
+                    Id = product.Id,
+                    Title = product.Title,
+                    Brand = product.Brand ?? "Unknown",
+                    OriginalPrice = product.Price,
+                    SalePrice = salePrice,
+                    Rating = product.Rating,
+                    InStock = product.Stock > 0,
+                };
+                JsonSerializer.Serialize(w, output, SampleJsonContext.Default.ProductOutput);
             },
             options,
             ct
@@ -253,3 +273,36 @@ app.MapGet(
 );
 
 app.Run();
+
+// ── Source-generated JSON types ────────────────────────────────────────
+// Zero reflection, AOT-compatible. Used by /stream/products.
+
+public sealed record ProductInput
+{
+    public int Id { get; init; }
+    public string Title { get; init; } = "";
+    public string? Brand { get; init; }
+    public double Price { get; init; }
+    public double DiscountPercentage { get; init; }
+    public double Rating { get; init; }
+    public int Stock { get; init; }
+}
+
+public sealed record ProductOutput
+{
+    public int Id { get; init; }
+    public string Title { get; init; } = "";
+    public string Brand { get; init; } = "";
+    public double OriginalPrice { get; init; }
+    public double SalePrice { get; init; }
+    public double Rating { get; init; }
+    public bool InStock { get; init; }
+}
+
+[JsonSourceGenerationOptions(
+    PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
+    DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+)]
+[JsonSerializable(typeof(ProductInput))]
+[JsonSerializable(typeof(ProductOutput))]
+public partial class SampleJsonContext : JsonSerializerContext;
