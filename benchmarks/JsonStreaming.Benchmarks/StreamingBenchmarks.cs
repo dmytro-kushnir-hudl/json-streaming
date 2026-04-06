@@ -29,35 +29,27 @@ public class StreamingBenchmarks
         _json = MakeJson(ItemCount);
     }
 
-    // ── 1. Callback only (zero-copy baseline) ──────────────────────────────
+    // ── 1. Baseline: what a dev writes without this library ───────────────
+    // Full-buffer JsonDocument.Parse, iterate items, extract same 2 fields,
+    // write to same Utf8JsonWriter. Same output, no streaming.
 
-    [Benchmark(Baseline = true, Description = "ProcessArray: callback (zero-copy)")]
-    public async Task<int> Callback_ZeroCopy()
-    {
-        var pipe = ToPipe(_json);
-        return await JsonStreamReader.ProcessArrayAsync(pipe, "items", _ => { });
-    }
-
-    // ── 2. STJ baselines ───────────────────────────────────────────────────
-
-    [Benchmark(Description = "Baseline: JsonDocument.Parse")]
-    public int Baseline_JsonDocument()
+    [Benchmark(Baseline = true, Description = "Baseline: JsonDocument full-buffer transform")]
+    public int Baseline_JsonDocumentFullBuffer()
     {
         using var doc = JsonDocument.Parse(_json);
+        using var writer = new Utf8JsonWriter(Stream.Null, SkipValidation);
+        writer.WriteStartArray();
         int count = 0;
-        foreach (var _ in doc.RootElement.GetProperty("items").EnumerateArray())
+        foreach (var item in doc.RootElement.GetProperty("items").EnumerateArray())
+        {
+            writer.WriteStartObject();
+            writer.WriteNumber("id"u8, item.GetProperty("id").GetInt32());
+            writer.WriteString("title"u8, item.GetProperty("title").GetString());
+            writer.WriteEndObject();
             count++;
+        }
+        writer.WriteEndArray();
         return count;
-    }
-
-    [Benchmark(Description = "Baseline: JsonSerializer.Deserialize<List<T>>")]
-    public int Baseline_Deserialize()
-    {
-        var wrapper = JsonSerializer.Deserialize(
-            _json,
-            BenchJsonContext.Default.ItemWrapper
-        );
-        return wrapper?.Items?.Count ?? 0;
     }
 
     // ── 3. WriteArray: verbatim (JsonDocument per item) ────────────────────
