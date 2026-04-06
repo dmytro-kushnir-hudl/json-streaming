@@ -24,7 +24,7 @@ public class JsonStreamReaderTests
         var pipe = ToPipe(json);
 
         var items = new List<int>();
-        await foreach (var doc in JsonStreamReader.EnumerateArrayAsync(pipe, "messages"))
+        await foreach (var doc in JsonStreamEnumerable.EnumerateArrayAsync(pipe, "messages"))
         {
             using (doc)
                 items.Add(doc.RootElement.GetProperty("id").GetInt32());
@@ -40,7 +40,7 @@ public class JsonStreamReaderTests
         var pipe = ToPipe(json);
 
         var items = new List<int>();
-        await foreach (var doc in JsonStreamReader.EnumerateArrayAsync(pipe, "response.data.items"))
+        await foreach (var doc in JsonStreamEnumerable.EnumerateArrayAsync(pipe, "response.data.items"))
         {
             using (doc)
                 items.Add(doc.RootElement.GetInt32());
@@ -56,7 +56,7 @@ public class JsonStreamReaderTests
         var pipe = ToPipe(json);
 
         var items = new List<int>();
-        await foreach (var doc in JsonStreamReader.EnumerateArrayAsync(pipe, ""))
+        await foreach (var doc in JsonStreamEnumerable.EnumerateArrayAsync(pipe, ""))
         {
             using (doc)
                 items.Add(doc.RootElement.GetInt32());
@@ -72,7 +72,7 @@ public class JsonStreamReaderTests
         var pipe = ToPipe(json);
 
         var count = 0;
-        await foreach (var doc in JsonStreamReader.EnumerateArrayAsync(pipe, "messages"))
+        await foreach (var doc in JsonStreamEnumerable.EnumerateArrayAsync(pipe, "messages"))
         {
             doc.Dispose();
             count++;
@@ -88,7 +88,7 @@ public class JsonStreamReaderTests
         var pipe = ToPipe(json);
 
         var count = 0;
-        await foreach (var doc in JsonStreamReader.EnumerateArrayAsync(pipe, "messages"))
+        await foreach (var doc in JsonStreamEnumerable.EnumerateArrayAsync(pipe, "messages"))
         {
             doc.Dispose();
             count++;
@@ -104,7 +104,7 @@ public class JsonStreamReaderTests
         var pipe = ToPipe(json);
 
         var items = new List<int>();
-        await foreach (var doc in JsonStreamReader.EnumerateArrayAsync(pipe, "messages"))
+        await foreach (var doc in JsonStreamEnumerable.EnumerateArrayAsync(pipe, "messages"))
         {
             using (doc)
                 items.Add(doc.RootElement.GetProperty("id").GetInt32());
@@ -169,7 +169,7 @@ public class JsonStreamReaderTests
         var path = JsonPath.Root.Property("data"u8).Property("items"u8);
 
         var items = new List<string>();
-        await foreach (var doc in JsonStreamReader.EnumerateArrayAsync(pipe, path))
+        await foreach (var doc in JsonStreamEnumerable.EnumerateArrayAsync(pipe, path))
         {
             using (doc)
                 items.Add(doc.RootElement.GetString()!);
@@ -236,7 +236,7 @@ public class JsonStreamReaderTests
         var pipe = ToPipe(json, bufferSize: 32);
 
         var count = 0;
-        await foreach (var doc in JsonStreamReader.EnumerateArrayAsync(pipe, "arr"))
+        await foreach (var doc in JsonStreamEnumerable.EnumerateArrayAsync(pipe, "arr"))
         {
             doc.Dispose();
             count++;
@@ -254,7 +254,7 @@ public class JsonStreamReaderTests
         var pipe = ToPipe(json);
 
         var types = new List<JsonValueKind>();
-        await foreach (var doc in JsonStreamReader.EnumerateArrayAsync(pipe, "arr"))
+        await foreach (var doc in JsonStreamEnumerable.EnumerateArrayAsync(pipe, "arr"))
         {
             using (doc)
                 types.Add(doc.RootElement.ValueKind);
@@ -468,7 +468,7 @@ public class JsonStreamReaderTests
         var path = JsonPath.Root.Property("pages"u8).Each().Property("results"u8);
 
         var items = new List<string>();
-        await foreach (var doc in JsonStreamReader.EnumerateArrayAsync(pipe, path))
+        await foreach (var doc in JsonStreamEnumerable.EnumerateArrayAsync(pipe, path))
         {
             using (doc)
                 items.Add(doc.RootElement.GetString()!);
