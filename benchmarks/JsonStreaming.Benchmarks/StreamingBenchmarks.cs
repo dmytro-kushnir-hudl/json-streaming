@@ -18,7 +18,7 @@ namespace JsonStreaming.Benchmarks;
 [Orderer(SummaryOrderPolicy.FastestToSlowest)]
 public class StreamingBenchmarks
 {
-    [Params(1_000, 100_000)]
+    [Params(1_000)]
     public int ItemCount { get; set; }
 
     private byte[] _json = [];
@@ -121,7 +121,53 @@ public class StreamingBenchmarks
         return count;
     }
 
-    // ── 6. Typed transform via source-gen (no JsonDocument) ────────────────
+    // ── 6. Zero-alloc transform via Utf8JsonReader → Utf8JsonWriter ──────
+
+    [Benchmark(Description = "WriteArray: transform (Utf8JsonReader, zero-alloc)")]
+    public async Task<int> Write_TransformUtf8Reader()
+    {
+        var pipe = ToPipe(_json);
+        await using var writer = new Utf8JsonWriter(Stream.Null, SkipValidation);
+        writer.WriteStartArray();
+        var count = await JsonStreamReader.WriteArrayAsync(
+            pipe,
+            "items",
+            writer,
+            (itemBytes, w) =>
+            {
+                var reader = new Utf8JsonReader(itemBytes);
+                reader.Read(); // StartObject
+                w.WriteStartObject();
+                while (reader.Read() && reader.TokenType == JsonTokenType.PropertyName)
+                {
+                    if (reader.ValueTextEquals("id"u8))
+                    {
+                        reader.Read();
+                        w.WriteNumber("id"u8, reader.GetInt32());
+                    }
+                    else if (reader.ValueTextEquals("title"u8))
+                    {
+                        reader.Read();
+                        w.WritePropertyName("title"u8);
+                        // Copy raw UTF-8 bytes — no string allocation
+                        if (!reader.HasValueSequence && !reader.ValueIsEscaped)
+                            w.WriteStringValue(reader.ValueSpan);
+                        else
+                            w.WriteStringValue(reader.GetString());
+                    }
+                    else
+                    {
+                        reader.Skip();
+                    }
+                }
+                w.WriteEndObject();
+            }
+        );
+        writer.WriteEndArray();
+        return count;
+    }
+
+    // ── 7. Typed transform via source-gen ─────────────────────────────────
 
     [Benchmark(Description = "WriteArray: typed transform (source-gen)")]
     public async Task<int> Write_TypedTransform()
@@ -141,7 +187,7 @@ public class StreamingBenchmarks
         return count;
     }
 
-    // ── 7. Typed verbatim via source-gen (deserialize + serialize same type)
+    // ── 8. Typed verbatim via source-gen (deserialize + serialize same type)
 
     [Benchmark(Description = "WriteArray: typed verbatim (source-gen)")]
     public async Task<int> Write_TypedVerbatim()
