@@ -18,36 +18,34 @@ var app = builder.Build();
 // ════════════════════════════════════════════════════════════════════════
 
 // Passthrough — items flow verbatim from upstream to client.
-// Use when: you just need to relay a JSON array from another service.
+// CancellationToken is injected by ASP.NET minimal API from ctx.RequestAborted.
+// It flows through: HttpClient.SendAsync → PipeReader.ReadAsync → WriteArrayAsync → AsyncFlush.
+// If the client disconnects, the entire pipeline cancels.
 app.MapGet(
     "/level1/passthrough",
-    async (HttpContext ctx, IHttpClientFactory httpFactory) =>
+    async (HttpContext ctx, IHttpClientFactory httpFactory, CancellationToken ct) =>
     {
-        await using var upstream = await ctx.StreamFrom(
-            httpFactory,
-            "https://jsonplaceholder.typicode.com/comments"
-        );
+        await using var upstream = await ctx.StreamFrom(httpFactory, "https://jsonplaceholder.typicode.com/comments", ct);
 
         await JsonStreamPipeline.PassthroughArrayAsync(
             upstream.Pipe,
             JsonPath.Root,
             ctx.Response.BodyWriter,
             "comments",
-            upstream.Ct
+            ct
         );
     }
 );
 
-// Typed transform — deserialize, compute, serialize a different shape.
-// Use when: you need business logic per item (pricing, enrichment, reshaping).
-// Filtering: return null to skip items.
+// Typed transform — CancellationToken flows the same way.
 app.MapGet(
     "/level1/transform",
-    async (HttpContext ctx, IHttpClientFactory httpFactory, int limit = 30) =>
+    async (HttpContext ctx, IHttpClientFactory httpFactory, CancellationToken ct, int limit = 30) =>
     {
         await using var upstream = await ctx.StreamFrom(
             httpFactory,
-            $"https://dummyjson.com/products?limit={limit}"
+            $"https://dummyjson.com/products?limit={limit}",
+            ct
         );
 
         await JsonStreamPipeline.TransformArrayAsync(
@@ -70,20 +68,20 @@ app.MapGet(
                 Rating = product.Rating,
                 InStock = product.Stock > 0,
             },
-            upstream.Ct
+            ct
         );
     }
 );
 
-// Filter — same type in and out, return null to skip.
-// Use when: you need server-side filtering of a large upstream array.
+// Filter — return null to skip items.
 app.MapGet(
     "/level1/filter",
-    async (HttpContext ctx, IHttpClientFactory httpFactory, int albumId = 1) =>
+    async (HttpContext ctx, IHttpClientFactory httpFactory, CancellationToken ct, int albumId = 1) =>
     {
         await using var upstream = await ctx.StreamFrom(
             httpFactory,
-            "https://jsonplaceholder.typicode.com/photos"
+            "https://jsonplaceholder.typicode.com/photos",
+            ct
         );
 
         await JsonStreamPipeline.TransformArrayAsync(
@@ -94,7 +92,7 @@ app.MapGet(
             SampleJsonContext.Default.Photo,
             SampleJsonContext.Default.Photo,
             photo => photo.AlbumId == albumId ? photo : null,
-            upstream.Ct
+            ct
         );
     }
 );
@@ -112,11 +110,12 @@ app.MapGet(
 // Use when: Pipeline doesn't match your output shape.
 app.MapGet(
     "/level2/typed",
-    async (HttpContext ctx, IHttpClientFactory httpFactory, int limit = 30) =>
+    async (HttpContext ctx, IHttpClientFactory httpFactory, CancellationToken ct, int limit = 30) =>
     {
         await using var upstream = await ctx.StreamFrom(
             httpFactory,
-            $"https://dummyjson.com/products?limit={limit}"
+            $"https://dummyjson.com/products?limit={limit}",
+            ct
         );
 
         var pipeWriter = ctx.Response.BodyWriter;
@@ -155,7 +154,7 @@ app.MapGet(
                 InStock = product.Stock > 0,
             },
             options,
-            upstream.Ct
+            ct
         );
 
         writer.WriteEndArray();
@@ -164,7 +163,7 @@ app.MapGet(
         writer.WriteEndObject();
         writer.Flush();
 
-        await pipeWriter.FlushAsync(upstream.Ct);
+        await pipeWriter.FlushAsync(ct);
     }
 );
 
@@ -180,7 +179,7 @@ app.MapGet(
 // Faster than typed deserialization when you only need 2-3 fields from a 20-field object.
 app.MapGet(
     "/level3/manual",
-    async (HttpContext ctx, IHttpClientFactory httpFactory) =>
+    async (HttpContext ctx, IHttpClientFactory httpFactory, CancellationToken ct) =>
     {
         await using var upstream = await ctx.StreamFrom(
             httpFactory,
@@ -216,7 +215,7 @@ app.MapGet(
                 w.WriteEndObject();
             },
             options,
-            upstream.Ct
+            ct
         );
 
         writer.WriteEndArray();
@@ -224,7 +223,7 @@ app.MapGet(
         writer.WriteEndObject();
         writer.Flush();
 
-        await pipeWriter.FlushAsync(upstream.Ct);
+        await pipeWriter.FlushAsync(ct);
     }
 );
 
@@ -239,7 +238,7 @@ app.MapGet(
 // Aggregation — count items by category without writing any JSON items.
 app.MapGet(
     "/level4/aggregate",
-    async (HttpContext ctx, IHttpClientFactory httpFactory) =>
+    async (HttpContext ctx, IHttpClientFactory httpFactory, CancellationToken ct) =>
     {
         await using var upstream = await ctx.StreamFrom(
             httpFactory,
@@ -267,7 +266,7 @@ app.MapGet(
                 brandCounts[brand] = brandCounts.GetValueOrDefault(brand) + 1;
                 totalValue += product.Price;
             },
-            upstream.Ct
+            ct
         );
 
         // Write the aggregation result (small, no streaming needed)
@@ -285,7 +284,7 @@ app.MapGet(
         writer.WriteEndObject();
         writer.Flush();
 
-        await output.FlushAsync(upstream.Ct);
+        await output.FlushAsync(ct);
     }
 );
 
@@ -302,9 +301,9 @@ app.MapGet(
 // then stream through a single PipeReader with Each().
 app.MapGet(
     "/deep/select-many",
-    async (HttpContext ctx, IHttpClientFactory httpFactory) =>
+    async (HttpContext ctx, IHttpClientFactory httpFactory, CancellationToken ct) =>
     {
-        var ct = ctx.RequestAborted;
+
         ctx.Response.ContentType = "application/json";
         ctx.Features.Get<IHttpResponseBodyFeature>()?.DisableBuffering();
 
@@ -350,7 +349,7 @@ app.MapGet(
 // Demonstrates $.response.data.items style deep navigation.
 app.MapGet(
     "/deep/nested",
-    async (HttpContext ctx, IHttpClientFactory httpFactory) =>
+    async (HttpContext ctx, IHttpClientFactory httpFactory, CancellationToken ct) =>
     {
         await using var upstream = await ctx.StreamFrom(
             httpFactory,
@@ -382,7 +381,7 @@ app.MapGet(
                 Rating = product.Rating,
                 InStock = product.Stock > 0,
             },
-            upstream.Ct
+            ct
         );
     }
 );
@@ -391,7 +390,7 @@ app.MapGet(
 // Use when: the path comes from configuration or user input.
 app.MapGet(
     "/deep/jsonpath",
-    async (HttpContext ctx, IHttpClientFactory httpFactory) =>
+    async (HttpContext ctx, IHttpClientFactory httpFactory, CancellationToken ct) =>
     {
         await using var upstream = await ctx.StreamFrom(
             httpFactory,
@@ -406,7 +405,7 @@ app.MapGet(
             path,
             ctx.Response.BodyWriter,
             "products",
-            upstream.Ct
+            ct
         );
     }
 );
@@ -421,9 +420,9 @@ app.MapGet(
 
 app.MapGet(
     "/multi-source",
-    async (HttpContext ctx, IHttpClientFactory httpFactory) =>
+    async (HttpContext ctx, IHttpClientFactory httpFactory, CancellationToken ct) =>
     {
-        var ct = ctx.RequestAborted;
+
         ctx.Response.ContentType = "application/json";
         ctx.Features.Get<IHttpResponseBodyFeature>()?.DisableBuffering();
 
@@ -485,38 +484,47 @@ app.Run();
 
 static class HttpContextExtensions
 {
+    /// <summary>
+    /// Fetch a URL with streaming and return a PipeReader handle.
+    /// </summary>
+    public static Task<UpstreamPipe> StreamFrom(
+        this HttpContext ctx,
+        IHttpClientFactory httpFactory,
+        string url,
+        CancellationToken ct = default
+    ) => ctx.StreamFrom(httpFactory, new HttpRequestMessage(HttpMethod.Get, url), ct);
+
+    /// <summary>
+    /// Send any HttpRequestMessage with streaming and return a PipeReader handle.
+    /// Use for POST, custom headers, auth tokens, etc.
+    /// </summary>
     public static async Task<UpstreamPipe> StreamFrom(
         this HttpContext ctx,
         IHttpClientFactory httpFactory,
-        string url
+        HttpRequestMessage request,
+        CancellationToken ct = default
     )
     {
         ctx.Response.ContentType = "application/json";
         ctx.Features.Get<IHttpResponseBodyFeature>()?.DisableBuffering();
 
-        var ct = ctx.RequestAborted;
         var http = httpFactory.CreateClient();
         var upstream = await http.SendAsync(
-            new HttpRequestMessage(HttpMethod.Get, url),
+            request,
             HttpCompletionOption.ResponseHeadersRead,
             ct
         );
         var stream = await upstream.Content.ReadAsStreamAsync(ct);
         var pipe = PipeReader.Create(stream, new StreamPipeReaderOptions(bufferSize: 8192));
 
-        return new UpstreamPipe(pipe, ct, http, upstream);
+        return new UpstreamPipe(pipe, http, upstream);
     }
 }
 
-sealed class UpstreamPipe(
-    PipeReader pipe,
-    CancellationToken ct,
-    HttpClient http,
-    HttpResponseMessage response
-) : IAsyncDisposable
+sealed class UpstreamPipe(PipeReader pipe, HttpClient http, HttpResponseMessage response)
+    : IAsyncDisposable
 {
     public PipeReader Pipe => pipe;
-    public CancellationToken Ct => ct;
 
     public async ValueTask DisposeAsync()
     {
