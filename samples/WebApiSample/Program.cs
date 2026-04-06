@@ -242,7 +242,7 @@ app.MapGet(
     {
         await using var upstream = await ctx.StreamFrom(
             httpFactory,
-            "https://dummyjson.com/products?limit=100"
+            "https://dummyjson.com/products?limit=1000"
         );
 
         // Aggregate in the callback — no output streaming needed
@@ -283,6 +283,109 @@ app.MapGet(
         writer.WriteEndObject();
         writer.WriteEndObject();
         writer.Flush();
+
+        await output.FlushAsync(ct);
+    }
+);
+
+// ════════════════════════════════════════════════════════════════════════
+// NDJSON — Newline-delimited JSON streaming.
+//
+// Each item is a complete JSON object on its own line. No wrapping array.
+// Content-Type: application/x-ndjson. Clients read line-by-line as data arrives.
+// Works with: fetch + ReadableStream, curl --no-buffer, EventSource polyfills.
+// ════════════════════════════════════════════════════════════════════════
+
+// NDJSON transform — one product per line, transformed shape.
+app.MapGet(
+    "/ndjson/products",
+    async (HttpContext ctx, IHttpClientFactory httpFactory, CancellationToken ct, int limit = 100) =>
+    {
+        ctx.Response.ContentType = "application/x-ndjson";
+        ctx.Features.Get<IHttpResponseBodyFeature>()?.DisableBuffering();
+
+        await using var upstream = await ctx.StreamFrom(
+            httpFactory,
+            $"https://dummyjson.com/products?limit={limit}",
+            ct
+        );
+
+        var output = ctx.Response.BodyWriter;
+        byte[] newline = [(byte)'\n'];
+
+        await JsonStreamReader.ProcessArrayAsync(
+            upstream.Pipe,
+            "products",
+            itemBytes =>
+            {
+                var reader = new Utf8JsonReader(itemBytes);
+                var product = JsonSerializer.Deserialize(
+                    ref reader,
+                    SampleJsonContext.Default.ProductInput
+                );
+                if (product is null)
+                    return;
+
+                var line = new ProductOutput
+                {
+                    Id = product.Id,
+                    Title = product.Title,
+                    Brand = product.Brand ?? "Unknown",
+                    OriginalPrice = product.Price,
+                    SalePrice = Math.Round(
+                        product.Price * (1 - product.DiscountPercentage / 100),
+                        2
+                    ),
+                    Rating = product.Rating,
+                    InStock = product.Stock > 0,
+                };
+
+                // Write one JSON object per line — no array wrapper
+                var buf = new ArrayBufferWriter<byte>();
+                using (var lw = new Utf8JsonWriter(buf))
+                    JsonSerializer.Serialize(lw, line, SampleJsonContext.Default.ProductOutput);
+                output.Write(buf.WrittenSpan);
+                output.Write(newline);
+            },
+            ct
+        );
+
+        await output.FlushAsync(ct);
+    }
+);
+
+// NDJSON passthrough — verbatim items, one per line. Simplest possible.
+app.MapGet(
+    "/ndjson/comments",
+    async (HttpContext ctx, IHttpClientFactory httpFactory, CancellationToken ct) =>
+    {
+        ctx.Response.ContentType = "application/x-ndjson";
+        ctx.Features.Get<IHttpResponseBodyFeature>()?.DisableBuffering();
+
+        await using var upstream = await ctx.StreamFrom(
+            httpFactory,
+            "https://jsonplaceholder.typicode.com/comments",
+            ct
+        );
+
+        var output = ctx.Response.BodyWriter;
+        byte[] newline = [(byte)'\n'];
+
+        await JsonStreamReader.ProcessArrayAsync(
+            upstream.Pipe,
+            JsonPath.Root,
+            itemBytes =>
+            {
+                // Re-serialize compact — upstream may be pretty-printed
+                using var doc = JsonDocument.Parse(itemBytes);
+                var buf = new ArrayBufferWriter<byte>();
+                using (var lw = new Utf8JsonWriter(buf))
+                    doc.RootElement.WriteTo(lw);
+                output.Write(buf.WrittenSpan);
+                output.Write(newline);
+            },
+            ct
+        );
 
         await output.FlushAsync(ct);
     }
