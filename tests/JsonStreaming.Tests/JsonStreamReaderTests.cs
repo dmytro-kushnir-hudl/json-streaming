@@ -550,4 +550,109 @@ public class JsonStreamReaderTests
         var result = JsonDocument.Parse(output.WrittenMemory);
         result.RootElement[0].GetProperty("data").GetString()!.Length.Should().Be(10_000);
     }
+
+    // ── Flush behavior ─────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task WriteArray_FlushesAtThreshold()
+    {
+        // 50 items × ~50 bytes each = ~2500 bytes total
+        // With a 500-byte threshold (90% = 450), should flush multiple times
+        var items = string.Join(",", Enumerable.Range(0, 50).Select(i => $$"""{"id":{{i}},"val":"data-{{i}}"}"""));
+        var json = $$$"""{"items":[{{{items}}}]}""";
+        var pipe = ToPipe(json);
+
+        var flushCounter = new FlushCountingBufferWriter();
+        using var writer = new Utf8JsonWriter(flushCounter);
+        var options = new WriteOptions { FlushThreshold = 500 };
+
+        writer.WriteStartArray();
+        var count = await JsonStreamReader.WriteArrayAsync(pipe, "items", writer, options);
+        writer.WriteEndArray();
+        writer.Flush(); // final flush
+
+        count.Should().Be(50);
+        // With ~2500 bytes total and 450-byte effective threshold,
+        // we expect multiple mid-stream flushes
+        flushCounter.FlushCount.Should().BeGreaterThanOrEqualTo(3);
+    }
+
+    [Fact]
+    public async Task WriteArray_NoFlushWhenDisabled()
+    {
+        var items = string.Join(",", Enumerable.Range(0, 50).Select(i => $$"""{"id":{{i}}}"""));
+        var json = $$$"""{"items":[{{{items}}}]}""";
+        var pipe = ToPipe(json);
+
+        var flushCounter = new FlushCountingBufferWriter();
+        using var writer = new Utf8JsonWriter(flushCounter);
+        var options = new WriteOptions { FlushThreshold = 0 }; // disabled
+
+        writer.WriteStartArray();
+        await JsonStreamReader.WriteArrayAsync(pipe, "items", writer, options);
+        writer.WriteEndArray();
+        writer.Flush(); // only this one
+
+        // Only the explicit final Flush() should have triggered
+        flushCounter.FlushCount.Should().Be(1);
+    }
+
+    [Fact]
+    public async Task WriteArray_SelectMany_FlushesAtThreshold()
+    {
+        // 3 groups × 10 items each = 30 items, ~1500 bytes
+        var groups = string.Join(
+            ",",
+            Enumerable.Range(0, 3).Select(g =>
+            {
+                var innerItems = string.Join(",", Enumerable.Range(0, 10).Select(i => $$"""{"g":{{g}},"i":{{i}}}"""));
+                return $$"""{"items":[{{innerItems}}]}""";
+            })
+        );
+        var json = $$$"""{"data":[{{{groups}}}]}""";
+        var pipe = ToPipe(json);
+        var path = JsonPath.Root.Property("data"u8).Each().Property("items"u8);
+
+        var flushCounter = new FlushCountingBufferWriter();
+        using var writer = new Utf8JsonWriter(flushCounter);
+        var options = new WriteOptions { FlushThreshold = 300 };
+
+        writer.WriteStartArray();
+        var count = await JsonStreamReader.WriteArrayAsync(pipe, path, writer, options);
+        writer.WriteEndArray();
+        writer.Flush();
+
+        count.Should().Be(30);
+        flushCounter.FlushCount.Should().BeGreaterThanOrEqualTo(2);
+    }
+
+    /// <summary>
+    /// IBufferWriter that counts how many times Utf8JsonWriter.Flush() commits bytes.
+    /// Each Flush() call triggers Advance() with the pending bytes — we count those.
+    /// </summary>
+    private sealed class FlushCountingBufferWriter : IBufferWriter<byte>
+    {
+        private byte[] _buffer = new byte[65_536];
+        private int _written;
+
+        public int FlushCount { get; private set; }
+
+        public void Advance(int count)
+        {
+            // Utf8JsonWriter calls Advance after each Flush with the pending byte count.
+            // A Flush with BytesPending > 0 calls Advance once.
+            if (count > 0)
+                FlushCount++;
+            _written += count;
+        }
+
+        public Memory<byte> GetMemory(int sizeHint = 0)
+        {
+            if (_written + sizeHint > _buffer.Length)
+                System.Array.Resize(ref _buffer, Math.Max(_buffer.Length * 2, _written + sizeHint));
+            return _buffer.AsMemory(_written);
+        }
+
+        public Span<byte> GetSpan(int sizeHint = 0) => GetMemory(sizeHint).Span;
+    }
 }
