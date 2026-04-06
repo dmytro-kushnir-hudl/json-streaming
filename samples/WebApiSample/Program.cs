@@ -300,9 +300,10 @@ app.MapGet(
 // NDJSON transform — one product per line with trailer for error/completion signal.
 // The trailer is the last line: {"__status":"complete","count":N} or {"__status":"error",...}
 // Clients: read lines, check __status field to detect end-of-stream and errors.
+// Pass ?failAt=N to simulate a mid-stream error at item N (demonstrates error trailer).
 app.MapGet(
     "/ndjson/products",
-    async (HttpContext ctx, IHttpClientFactory httpFactory, CancellationToken ct, int limit = 100) =>
+    async (HttpContext ctx, IHttpClientFactory httpFactory, CancellationToken ct, int limit = 100, int? failAt = null) =>
     {
         ctx.Response.ContentType = "application/x-ndjson";
         ctx.Features.Get<IHttpResponseBodyFeature>()?.DisableBuffering();
@@ -330,6 +331,12 @@ app.MapGet(
                     );
                     if (product is null)
                         return;
+
+                    // Simulate mid-stream failure
+                    if (failAt.HasValue && product.Id == failAt.Value)
+                        throw new InvalidOperationException(
+                            $"Simulated upstream failure at product {product.Id}"
+                        );
 
                     var line = new ProductOutput
                     {
