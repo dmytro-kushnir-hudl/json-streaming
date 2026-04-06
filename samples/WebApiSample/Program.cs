@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.IO.Pipelines;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -8,29 +9,41 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddHttpClient();
 var app = builder.Build();
 
-// ── GET /stream/comments — verbatim passthrough ────────────────────────
-// 500 comments from JSONPlaceholder, root array, no transformation.
+// ════════════════════════════════════════════════════════════════════════
+// LEVEL 1 — Highest abstraction: JsonStreamPipeline
+//
+// One call does everything: envelope, flush, backpressure, error recovery.
+// You provide: input pipe, path, output pipe, types, transform lambda.
+// Trade-off: least control, but fewest ways to get it wrong.
+// ════════════════════════════════════════════════════════════════════════
+
+// Passthrough — items flow verbatim from upstream to client.
+// Use when: you just need to relay a JSON array from another service.
 app.MapGet(
-    "/stream/comments",
+    "/level1/passthrough",
     async (HttpContext ctx, IHttpClientFactory httpFactory) =>
     {
-        await using var upstream = await ctx.StreamFrom(httpFactory, "https://jsonplaceholder.typicode.com/comments");
+        await using var upstream = await ctx.StreamFrom(
+            httpFactory,
+            "https://jsonplaceholder.typicode.com/comments"
+        );
 
         await JsonStreamPipeline.PassthroughArrayAsync(
             upstream.Pipe,
             JsonPath.Root,
             ctx.Response.BodyWriter,
-            "results",
+            "comments",
             upstream.Ct
         );
     }
 );
 
-// ── GET /stream/products — typed transform ─────────────────────────────
-// Deserialize ProductInput → compute sale price → serialize ProductOutput.
+// Typed transform — deserialize, compute, serialize a different shape.
+// Use when: you need business logic per item (pricing, enrichment, reshaping).
+// Filtering: return null to skip items.
 app.MapGet(
-    "/stream/products",
-    async (HttpContext ctx, IHttpClientFactory httpFactory, int limit = 100) =>
+    "/level1/transform",
+    async (HttpContext ctx, IHttpClientFactory httpFactory, int limit = 30) =>
     {
         await using var upstream = await ctx.StreamFrom(
             httpFactory,
@@ -62,10 +75,10 @@ app.MapGet(
     }
 );
 
-// ── GET /stream/photos — filter by albumId ─────────────────────────────
-// 5000 photos, return null from transform to skip non-matching items.
+// Filter — same type in and out, return null to skip.
+// Use when: you need server-side filtering of a large upstream array.
 app.MapGet(
-    "/stream/photos",
+    "/level1/filter",
     async (HttpContext ctx, IHttpClientFactory httpFactory, int albumId = 1) =>
     {
         await using var upstream = await ctx.StreamFrom(
@@ -86,10 +99,328 @@ app.MapGet(
     }
 );
 
-// ── GET /stream/todos — sequential pages, same output array ────────────
-// Fetches 3 pages, streams each page's $.todos into one output array.
+// ════════════════════════════════════════════════════════════════════════
+// LEVEL 2 — Mid-level: JsonStreamReaderTyped
+//
+// You own the Utf8JsonWriter and the JSON envelope. The library handles
+// deserialization/serialization via source-gen JsonTypeInfo<T>.
+// Trade-off: more control over output structure, but you manage
+// writer lifecycle, envelope, and flush yourself.
+// ════════════════════════════════════════════════════════════════════════
+
+// Typed transform with custom envelope — add metadata fields, nest differently.
+// Use when: Pipeline doesn't match your output shape.
 app.MapGet(
-    "/stream/todos",
+    "/level2/typed",
+    async (HttpContext ctx, IHttpClientFactory httpFactory, int limit = 30) =>
+    {
+        await using var upstream = await ctx.StreamFrom(
+            httpFactory,
+            $"https://dummyjson.com/products?limit={limit}"
+        );
+
+        var pipeWriter = ctx.Response.BodyWriter;
+        await using var writer = new Utf8JsonWriter(pipeWriter);
+        var options = new WriteOptions
+        {
+            AsyncFlush = async flushCt =>
+            {
+                await pipeWriter.FlushAsync(flushCt);
+            },
+        };
+
+        // Custom envelope: add request metadata alongside results
+        writer.WriteStartObject();
+        writer.WriteString("source"u8, "dummyjson.com");
+        writer.WriteNumber("limit"u8, limit);
+        writer.WriteStartArray("products"u8);
+
+        var count = await JsonStreamReaderTyped.WriteArrayAsync(
+            upstream.Pipe,
+            "products",
+            writer,
+            SampleJsonContext.Default.ProductInput,
+            SampleJsonContext.Default.ProductOutput,
+            product => new ProductOutput
+            {
+                Id = product.Id,
+                Title = product.Title,
+                Brand = product.Brand ?? "Unknown",
+                OriginalPrice = product.Price,
+                SalePrice = Math.Round(
+                    product.Price * (1 - product.DiscountPercentage / 100),
+                    2
+                ),
+                Rating = product.Rating,
+                InStock = product.Stock > 0,
+            },
+            options,
+            upstream.Ct
+        );
+
+        writer.WriteEndArray();
+        writer.WriteNumber("count"u8, count);
+        writer.WriteBoolean("complete"u8, true);
+        writer.WriteEndObject();
+        writer.Flush();
+
+        await pipeWriter.FlushAsync(upstream.Ct);
+    }
+);
+
+// ════════════════════════════════════════════════════════════════════════
+// LEVEL 3 — Low-level: JsonStreamReader.WriteArrayAsync + WriteItemDelegate
+//
+// You get raw bytes per item. You decide what to parse and what to write.
+// Trade-off: full control, but you handle Utf8JsonReader/JsonDocument yourself.
+// Use when: you need partial field extraction, or mixed parsing strategies.
+// ════════════════════════════════════════════════════════════════════════
+
+// Manual field extraction — pick specific fields without deserializing the full object.
+// Faster than typed deserialization when you only need 2-3 fields from a 20-field object.
+app.MapGet(
+    "/level3/manual",
+    async (HttpContext ctx, IHttpClientFactory httpFactory) =>
+    {
+        await using var upstream = await ctx.StreamFrom(
+            httpFactory,
+            "https://jsonplaceholder.typicode.com/comments"
+        );
+
+        var pipeWriter = ctx.Response.BodyWriter;
+        await using var writer = new Utf8JsonWriter(pipeWriter);
+        var options = new WriteOptions
+        {
+            AsyncFlush = async flushCt =>
+            {
+                await pipeWriter.FlushAsync(flushCt);
+            },
+        };
+
+        writer.WriteStartObject();
+        writer.WriteStartArray("comments"u8);
+
+        var count = await JsonStreamReader.WriteArrayAsync(
+            upstream.Pipe,
+            JsonPath.Root,
+            writer,
+            (itemBytes, w) =>
+            {
+                // Parse only what we need — skip 3 of 5 fields
+                using var doc = JsonDocument.Parse(itemBytes);
+                var root = doc.RootElement;
+
+                w.WriteStartObject();
+                w.WriteString("email"u8, root.GetProperty("email").GetString());
+                w.WriteString("body"u8, root.GetProperty("body").GetString());
+                w.WriteEndObject();
+            },
+            options,
+            upstream.Ct
+        );
+
+        writer.WriteEndArray();
+        writer.WriteNumber("count"u8, count);
+        writer.WriteEndObject();
+        writer.Flush();
+
+        await pipeWriter.FlushAsync(upstream.Ct);
+    }
+);
+
+// ════════════════════════════════════════════════════════════════════════
+// LEVEL 4 — Lowest level: JsonStreamReader.ProcessArrayAsync + raw callback
+//
+// Zero-copy: you get ReadOnlySequence<byte> per item. No writer involved.
+// Trade-off: maximum performance and flexibility, but you handle everything.
+// Use when: aggregation, side effects, or non-JSON output.
+// ════════════════════════════════════════════════════════════════════════
+
+// Aggregation — count items by category without writing any JSON items.
+app.MapGet(
+    "/level4/aggregate",
+    async (HttpContext ctx, IHttpClientFactory httpFactory) =>
+    {
+        await using var upstream = await ctx.StreamFrom(
+            httpFactory,
+            "https://dummyjson.com/products?limit=100"
+        );
+
+        // Aggregate in the callback — no output streaming needed
+        var brandCounts = new Dictionary<string, int>();
+        double totalValue = 0;
+
+        await JsonStreamReader.ProcessArrayAsync(
+            upstream.Pipe,
+            "products",
+            itemBytes =>
+            {
+                var reader = new Utf8JsonReader(itemBytes);
+                var product = JsonSerializer.Deserialize(
+                    ref reader,
+                    SampleJsonContext.Default.ProductInput
+                );
+                if (product is null)
+                    return;
+
+                var brand = product.Brand ?? "Unknown";
+                brandCounts[brand] = brandCounts.GetValueOrDefault(brand) + 1;
+                totalValue += product.Price;
+            },
+            upstream.Ct
+        );
+
+        // Write the aggregation result (small, no streaming needed)
+        ctx.Response.ContentType = "application/json";
+        var output = ctx.Response.BodyWriter;
+        await using var writer = new Utf8JsonWriter(output);
+
+        writer.WriteStartObject();
+        writer.WriteNumber("totalProducts"u8, brandCounts.Values.Sum());
+        writer.WriteNumber("totalValue"u8, Math.Round(totalValue, 2));
+        writer.WriteStartObject("brandCounts"u8);
+        foreach (var (brand, count) in brandCounts.OrderByDescending(kv => kv.Value))
+            writer.WriteNumber(brand, count);
+        writer.WriteEndObject();
+        writer.WriteEndObject();
+        writer.Flush();
+
+        await output.FlushAsync(upstream.Ct);
+    }
+);
+
+// ════════════════════════════════════════════════════════════════════════
+// DEEP MATCHING — JsonPath with Each() for select-many across nested arrays.
+//
+// Upstream shape: {"pages": [{"todos": [...]}, {"todos": [...]}, ...]}
+// Each() flattens: iterate each page, yield all todos across all pages.
+// Also works with nested paths: $.data.response[*].results.items
+// ════════════════════════════════════════════════════════════════════════
+
+// Select-many: flatten nested arrays from a single upstream response.
+// DummyJSON doesn't return this shape natively, so we build it from 3 pages
+// then stream through a single PipeReader with Each().
+app.MapGet(
+    "/deep/select-many",
+    async (HttpContext ctx, IHttpClientFactory httpFactory) =>
+    {
+        var ct = ctx.RequestAborted;
+        ctx.Response.ContentType = "application/json";
+        ctx.Features.Get<IHttpResponseBodyFeature>()?.DisableBuffering();
+
+        // Build a nested structure: {"data":{"pages":[{page1},{page2},{page3}]}}
+        using var http = httpFactory.CreateClient();
+        var pages = new List<string>();
+        for (int skip = 0; skip < 90; skip += 30)
+        {
+            pages.Add(
+                await http.GetStringAsync(
+                    $"https://dummyjson.com/todos?limit=30&skip={skip}",
+                    ct
+                )
+            );
+        }
+
+        var nested = $$$"""{"data":{"pages":[{{{string.Join(",", pages)}}}]}}""";
+        var pipe = PipeReader.Create(
+            new MemoryStream(System.Text.Encoding.UTF8.GetBytes(nested)),
+            new StreamPipeReaderOptions(bufferSize: 8192)
+        );
+
+        // Deep path: navigate data → pages → [*] → todos
+        var path = JsonPath.Root
+            .Property("data"u8)
+            .Property("pages"u8)
+            .Each()
+            .Property("todos"u8);
+
+        await JsonStreamPipeline.PassthroughArrayAsync(
+            pipe,
+            path,
+            ctx.Response.BodyWriter,
+            "todos",
+            ct
+        );
+
+        await pipe.CompleteAsync();
+    }
+);
+
+// Nested path without Each() — navigate deep into a single response.
+// Demonstrates $.response.data.items style deep navigation.
+app.MapGet(
+    "/deep/nested",
+    async (HttpContext ctx, IHttpClientFactory httpFactory) =>
+    {
+        await using var upstream = await ctx.StreamFrom(
+            httpFactory,
+            "https://dummyjson.com/products?limit=5"
+        );
+
+        // DummyJSON wraps products in {"products": [...], "total": ...}
+        // Navigate with JsonPath: $.products
+        // For deeper nesting, use: JsonPath.Root.Property("a"u8).Property("b"u8).Property("c"u8)
+        var path = JsonPath.Root.Property("products"u8);
+
+        await JsonStreamPipeline.TransformArrayAsync(
+            upstream.Pipe,
+            path,
+            ctx.Response.BodyWriter,
+            "items",
+            SampleJsonContext.Default.ProductInput,
+            SampleJsonContext.Default.ProductOutput,
+            product => new ProductOutput
+            {
+                Id = product.Id,
+                Title = product.Title,
+                Brand = product.Brand ?? "Unknown",
+                OriginalPrice = product.Price,
+                SalePrice = Math.Round(
+                    product.Price * (1 - product.DiscountPercentage / 100),
+                    2
+                ),
+                Rating = product.Rating,
+                InStock = product.Stock > 0,
+            },
+            upstream.Ct
+        );
+    }
+);
+
+// JSONPath.Parse — same deep navigation from a string.
+// Use when: the path comes from configuration or user input.
+app.MapGet(
+    "/deep/jsonpath",
+    async (HttpContext ctx, IHttpClientFactory httpFactory) =>
+    {
+        await using var upstream = await ctx.StreamFrom(
+            httpFactory,
+            "https://dummyjson.com/products?limit=5"
+        );
+
+        // Parse from JSONPath string — equivalent to JsonPath.Root.Property("products"u8)
+        var path = JsonPath.Parse("$.products");
+
+        await JsonStreamPipeline.PassthroughArrayAsync(
+            upstream.Pipe,
+            path,
+            ctx.Response.BodyWriter,
+            "products",
+            upstream.Ct
+        );
+    }
+);
+
+// ════════════════════════════════════════════════════════════════════════
+// LEVEL 3+: Multi-source — sequential pages into one output array.
+//
+// Not possible with Pipeline (single input). Use WriteArrayAsync directly
+// with a shared writer across multiple PipeReaders.
+// Trade-off: most boilerplate, but handles patterns Pipeline can't.
+// ════════════════════════════════════════════════════════════════════════
+
+app.MapGet(
+    "/multi-source",
     async (HttpContext ctx, IHttpClientFactory httpFactory) =>
     {
         var ct = ctx.RequestAborted;
@@ -114,7 +445,7 @@ app.MapGet(
         int totalCount = 0;
         for (int skip = 0; skip < 90; skip += 30)
         {
-            using var upstream = await http.SendAsync(
+            using var resp = await http.SendAsync(
                 new HttpRequestMessage(
                     HttpMethod.Get,
                     $"https://dummyjson.com/todos?limit=30&skip={skip}"
@@ -122,7 +453,7 @@ app.MapGet(
                 HttpCompletionOption.ResponseHeadersRead,
                 ct
             );
-            await using var stream = await upstream.Content.ReadAsStreamAsync(ct);
+            await using var stream = await resp.Content.ReadAsStreamAsync(ct);
             var pipe = PipeReader.Create(
                 stream,
                 new StreamPipeReaderOptions(bufferSize: 8192)
@@ -154,11 +485,6 @@ app.Run();
 
 static class HttpContextExtensions
 {
-    /// <summary>
-    /// Fetches a URL with streaming (ResponseHeadersRead), sets response headers,
-    /// and returns a handle that owns the HttpClient + response lifecycle.
-    /// Dispose the handle after streaming is complete.
-    /// </summary>
     public static async Task<UpstreamPipe> StreamFrom(
         this HttpContext ctx,
         IHttpClientFactory httpFactory,
@@ -182,9 +508,6 @@ static class HttpContextExtensions
     }
 }
 
-/// <summary>
-/// Owns the PipeReader + upstream HTTP resources. Dispose after streaming.
-/// </summary>
 sealed class UpstreamPipe(
     PipeReader pipe,
     CancellationToken ct,
@@ -203,7 +526,7 @@ sealed class UpstreamPipe(
     }
 }
 
-// ── Source-generated JSON types ────────────────────────────────────────
+// ── Source-generated JSON types (AOT-compatible, zero reflection) ───────
 
 public sealed record ProductInput
 {
