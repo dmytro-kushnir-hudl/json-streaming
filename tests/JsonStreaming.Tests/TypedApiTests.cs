@@ -117,7 +117,7 @@ public class TypedApiTests
         using var writer = new Utf8JsonWriter(output);
 
         writer.WriteStartArray();
-        await JsonStreamReaderTyped.WriteArrayAsync(
+        var count = await JsonStreamReaderTyped.WriteArrayAsync(
             pipe,
             "items",
             writer,
@@ -130,6 +130,7 @@ public class TypedApiTests
         writer.WriteEndArray();
         writer.Flush();
 
+            count.Should().Be(2);
         var result = JsonDocument.Parse(output.WrittenMemory);
         result.RootElement.GetArrayLength().Should().Be(2);
         result.RootElement[0].GetProperty("id").GetInt32().Should().Be(1);
