@@ -30,26 +30,22 @@ public class StreamingBenchmarks
     }
 
     // ── 1. Baseline: what a dev writes without this library ───────────────
-    // Full-buffer JsonDocument.Parse, iterate items, extract same 2 fields,
-    // write to same Utf8JsonWriter. Same output, no streaming.
+    // Deserialize into List<T>, LINQ Select, serialize back.
+    // This is the normal .NET pattern — no streaming, full buffer.
 
-    [Benchmark(Baseline = true, Description = "Baseline: JsonDocument full-buffer transform")]
-    public int Baseline_JsonDocumentFullBuffer()
+    [Benchmark(Baseline = true, Description = "Baseline: Deserialize → LINQ → Serialize")]
+    public void Baseline_DeserializeLinqSerialize()
     {
-        using var doc = JsonDocument.Parse(_json);
-        using var writer = new Utf8JsonWriter(Stream.Null, SkipValidation);
-        writer.WriteStartArray();
-        int count = 0;
-        foreach (var item in doc.RootElement.GetProperty("items").EnumerateArray())
-        {
-            writer.WriteStartObject();
-            writer.WriteNumber("id"u8, item.GetProperty("id").GetInt32());
-            writer.WriteString("title"u8, item.GetProperty("title").GetString());
-            writer.WriteEndObject();
-            count++;
-        }
-        writer.WriteEndArray();
-        return count;
+        var wrapper = JsonSerializer.Deserialize(
+            _json,
+            BenchJsonContext.Default.ItemWrapper
+        )!;
+
+        var results = wrapper
+            .Items!.Select(item => new BenchItemSlim { Id = item.Id, Title = item.Title })
+            .ToList();
+
+        JsonSerializer.Serialize(Stream.Null, results, BenchJsonContext.Default.ListBenchItemSlim);
     }
 
     // ── 3. WriteArray: verbatim (JsonDocument per item) ────────────────────
@@ -247,5 +243,6 @@ public sealed record ItemWrapper
 [JsonSourceGenerationOptions(PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
 [JsonSerializable(typeof(BenchItem))]
 [JsonSerializable(typeof(BenchItemSlim))]
+[JsonSerializable(typeof(List<BenchItemSlim>))]
 [JsonSerializable(typeof(ItemWrapper))]
 internal partial class BenchJsonContext : JsonSerializerContext;
