@@ -1,12 +1,12 @@
 # JsonStreaming
 
-Bounded-memory streaming JSON array processor for .NET. Reads from `PipeReader`, writes to `Utf8JsonWriter`, with ~8KB working set regardless of input size.
+Bounded-memory streaming JSON array processor for .NET. Reads from `PipeReader`, writes to `Utf8JsonWriter`, with ~15MB working set at 200K items vs 69MB for the standard Deserialize/LINQ/Serialize pattern.
 
 ## Why
 
 `System.Text.Json` has `Utf8JsonReader` (low-level, no async, no `PipeReader`) and `JsonDocument`/`JsonSerializer` (full-buffer). Nothing in between for streaming array enumeration with bounded memory and HTTP backpressure.
 
-This library fills that gap.
+This library fills that gap: **2.7x faster, 78% less memory** than the standard .NET pattern for JSON array relay/transform.
 
 ## Install
 
@@ -21,24 +21,28 @@ Targets `net8.0`, `net9.0`, `net10.0`.
 ### Highest level — one call, everything handled
 
 ```csharp
-await using var upstream = await ctx.StreamFrom(httpFactory, url, ct);
+app.MapGet("/api/products", async (HttpContext ctx, IHttpClientFactory httpFactory, CancellationToken ct) =>
+{
+    await using var upstream = await ctx.StreamFrom(httpFactory, url, ct);
 
-await JsonStreamPipeline.TransformArrayAsync(
-    upstream.Pipe,
-    "products",                              // source path in upstream JSON
-    ctx.Response.BodyWriter,                 // output PipeWriter
-    "products",                              // output array name
-    Ctx.Default.ProductInput,                // source-gen deserializer
-    Ctx.Default.ProductOutput,               // source-gen serializer
-    product => new ProductOutput             // transform (return null to filter)
-    {
-        Id = product.Id,
-        Title = product.Title,
-        SalePrice = product.Price * 0.9,
-    },
-    ct
-);
+    await JsonStreamPipeline.TransformArrayAsync(
+        upstream.Pipe,
+        "products",                          // source path in upstream JSON
+        ctx.Response.BodyWriter,             // output PipeWriter
+        "products",                          // output array name
+        Ctx.Default.ProductInput,            // source-gen deserializer
+        Ctx.Default.ProductOutput,           // source-gen serializer
+        product => new ProductOutput         // transform (return null to filter)
+        {
+            Id = product.Id,
+            Title = product.Title,
+            SalePrice = product.Price * 0.9,
+        },
+        ct
+    );
+});
 // Output: {"products":[...], "count": N}
+// Response: transfer-encoding: chunked, with backpressure
 ```
 
 ### Lowest level — zero-copy callback
@@ -56,10 +60,28 @@ await JsonStreamReader.ProcessArrayAsync(pipe, "items", itemBytes =>
 
 | Level | Class | You control | Trade-off |
 |-------|-------|-------------|-----------|
-| **1** | `JsonStreamPipeline` | Transform lambda | Least code, fixed envelope |
-| **2** | `JsonStreamReaderTyped` | Envelope + types | Custom output structure |
-| **3** | `JsonStreamReader.WriteArrayAsync` | Raw `WriteItemDelegate` | Manual field extraction |
-| **4** | `JsonStreamReader.ProcessArrayAsync` | `ReadOnlySequence<byte>` | Aggregation, non-JSON output |
+| **1** | `JsonStreamPipeline` | Transform lambda | Least code, fixed envelope, error recovery |
+| **2** | `JsonStreamReaderTyped` | Envelope + types | Custom output structure, source-gen types |
+| **3** | `JsonStreamReader.WriteArrayAsync` | Raw `WriteItemDelegate` | Manual field extraction, max throughput |
+| **4** | `JsonStreamReader.ProcessArrayAsync` | `ReadOnlySequence<byte>` | Aggregation, non-JSON output, NDJSON |
+
+## Performance
+
+Benchmarked at 200K items (~18MB JSON), Apple M4 Pro, .NET 10:
+
+| Method | Time | Memory | vs Baseline |
+|--------|------|--------|-------------|
+| **Verbatim passthrough** (`WriteRawValue`) | **51ms** | **15MB** | **2.7x faster, 78% less** |
+| Utf8JsonReader transform (select 2 fields) | 91ms | 15MB | 1.5x faster, 78% less |
+| JsonDocument transform | 125ms | 39MB | 1.1x faster, 44% less |
+| **Baseline** (Deserialize → LINQ → Serialize) | **136ms** | **69MB** | **1.0x** |
+| Typed source-gen transform (TIn → TOut) | 176ms | 78MB | 0.8x, +13% alloc |
+
+**Verbatim passthrough** uses `Utf8JsonWriter.WriteRawValue` — zero parsing, single memcpy per item. Items are already validated by `Utf8JsonReader`; no re-parse needed.
+
+**Flush is faster than no flush**: periodic `writer.Flush()` resets the internal buffer, preventing unbounded growth. With flush disabled at 200K items: 69ms / 50MB. With 16KB flush: 51ms / 15MB. The GC pressure reduction from smaller buffers more than pays for the flush overhead.
+
+**GC dump analysis** (14 threads, 243M items processed): zero library objects on the heap. Only ArrayPool bucket cache from returned `Utf8JsonWriter` buffer rentals. All `PipeReader` `BufferSegment` rentals correctly returned via `CompleteAsync` → `Reset` → `ArrayPool.Return`.
 
 ## Features
 
@@ -86,17 +108,17 @@ await JsonStreamPipeline.PassthroughArrayAsync(pipe, path, output, "results", ct
 
 ### HTTP Backpressure
 
-Write-through methods flush automatically when buffered bytes exceed a threshold. The async flush callback enables true HTTP backpressure via `PipeWriter.FlushAsync`:
+Write-through methods flush automatically when buffered bytes exceed a threshold (90% of 16KB by default, matching `System.Text.Json`). The async flush callback enables true HTTP backpressure:
 
 ```csharp
 var options = new WriteOptions
 {
-    FlushThreshold = 16_384,  // flush at ~14.7KB (90% of 16KB)
+    FlushThreshold = 16_384,
     AsyncFlush = async ct => { await pipeWriter.FlushAsync(ct); },
 };
 ```
 
-The iteration loop uses a checkpoint-and-resume pattern: save `JsonReaderState`, break the sync inner loop (destroying the ref struct `Utf8JsonReader`), await the flush, reconstruct the reader.
+The iteration loop uses a checkpoint-and-resume pattern: save `JsonReaderState`, break the sync inner loop (destroying the ref struct `Utf8JsonReader`), await the flush, reconstruct the reader. Same pattern as `System.Text.Json`'s `IAsyncEnumerable` serializer.
 
 ### Filtering
 
@@ -106,9 +128,28 @@ Return `null` from a transform to skip items:
 await JsonStreamPipeline.TransformArrayAsync(
     pipe, path, output, "photos",
     Ctx.Default.Photo, Ctx.Default.Photo,
-    photo => photo.AlbumId == 1 ? photo : null,  // null = skip
+    photo => photo.AlbumId == 1 ? photo : null,
     ct
 );
+```
+
+### NDJSON Streaming
+
+```csharp
+ctx.Response.ContentType = "application/x-ndjson";
+await JsonStreamReader.ProcessArrayAsync(pipe, "items", itemBytes =>
+{
+    // one JSON object per line
+    output.WriteNdjsonLine(transform(itemBytes), Ctx.Default.OutputType);
+}, ct);
+```
+
+With header/footer envelope for error signaling:
+```
+{"__stream":"begin","streamId":"a1b2c3d4...","version":1}
+{"id":1,"title":"..."}
+{"id":2,"title":"..."}
+{"__stream":"end","streamId":"a1b2c3d4...","count":2}
 ```
 
 ### Source Generator Support
@@ -119,53 +160,44 @@ All typed APIs accept `JsonTypeInfo<T>` for AOT-compatible, zero-reflection oper
 [JsonSerializable(typeof(ProductInput))]
 [JsonSerializable(typeof(ProductOutput))]
 public partial class Ctx : JsonSerializerContext;
-
-// Used as: Ctx.Default.ProductInput, Ctx.Default.ProductOutput
 ```
-
-## ASP.NET Core Integration
-
-```csharp
-app.MapGet("/api/products", async (HttpContext ctx, IHttpClientFactory httpFactory, CancellationToken ct) =>
-{
-    await using var upstream = await ctx.StreamFrom(httpFactory, "https://api.example.com/products", ct);
-
-    await JsonStreamPipeline.TransformArrayAsync(
-        upstream.Pipe, "products", ctx.Response.BodyWriter, "products",
-        Ctx.Default.ProductInput, Ctx.Default.ProductOutput,
-        product => new ProductOutput { Id = product.Id, Title = product.Title },
-        ct
-    );
-});
-```
-
-Response streams as `transfer-encoding: chunked` with backpressure. Client disconnect cancels the entire pipeline via `CancellationToken`.
-
-## Performance
-
-At 100K items (~15MB JSON):
-
-| Method | Time | Allocated |
-|--------|------|-----------|
-| `ProcessArrayAsync` (callback) | 16ms | 9KB |
-| `JsonDocument.Parse` (baseline) | 15ms | 48MB |
-| `JsonSerializer.Deserialize` (baseline) | 14ms | 154MB |
-
-The library adds ~9KB constant overhead regardless of input size. Streaming means the first byte reaches the client before the last byte is read from upstream.
 
 ## Sample App
 
-See [`samples/WebApiSample`](samples/WebApiSample/) for 9 endpoints demonstrating every abstraction level, from one-liner passthrough to multi-source page aggregation.
+See [`samples/WebApiSample`](samples/WebApiSample/) — 11 endpoints from highest to lowest abstraction:
+
+| Endpoint | Pattern |
+|----------|---------|
+| `/level1/passthrough` | Pipeline verbatim relay |
+| `/level1/transform` | Pipeline typed transform |
+| `/level1/filter` | Pipeline filter (null = skip) |
+| `/level2/typed` | Custom envelope + metadata |
+| `/level3/manual` | WriteItemDelegate, manual fields |
+| `/level4/aggregate` | Zero-copy callback, aggregation |
+| `/ndjson/products` | NDJSON with typed transform |
+| `/ndjson/comments` | NDJSON passthrough |
+| `/deep/select-many` | `Each()` across nested pages |
+| `/deep/nested` | Deep JsonPath navigation |
+| `/multi-source` | Sequential pages, shared writer |
 
 ```bash
 cd samples/WebApiSample
 dotnet run
-# http://localhost:5000/level1/passthrough
-# http://localhost:5000/level1/transform?limit=10
-# http://localhost:5000/level1/filter?albumId=2
-# http://localhost:5000/level4/aggregate
-# http://localhost:5000/deep/select-many
 ```
+
+## Architecture
+
+```
+PipeReader (input)
+    → JsonPathNavigator (navigate to target array)
+    → Utf8JsonReader (parse items, ref struct, sync)
+    → callback / WriteRawValue / WriteItemDelegate
+    → Utf8JsonWriter (output, backed by PipeWriter)
+    → checkpoint & flush (async, backpressure)
+    → PipeWriter.FlushAsync (HTTP chunked transfer)
+```
+
+Key constraint: `Utf8JsonReader` is a ref struct — can't cross `await` or `yield`. The library solves this with a checkpoint pattern: save `JsonReaderState` (plain struct), destroy the reader, await, reconstruct. Same approach as `System.Text.Json`'s internal `ContinueDeserialize` method.
 
 ## License
 
