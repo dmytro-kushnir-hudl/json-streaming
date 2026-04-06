@@ -315,6 +315,8 @@ app.MapGet(
         );
 
         var output = ctx.Response.BodyWriter;
+        var (header, streamId) = NdjsonEnvelope.CreateHeader();
+        output.WriteNdjsonLine(header, SampleJsonContext.Default.NdjsonEnvelope);
         int count = 0;
 
         try
@@ -359,19 +361,19 @@ app.MapGet(
             );
 
             output.WriteNdjsonLine(
-                new NdjsonTrailer { Status = "complete", Count = count },
-                SampleJsonContext.Default.NdjsonTrailer
+                NdjsonEnvelope.CreateFooter(streamId, count),
+                SampleJsonContext.Default.NdjsonEnvelope
             );
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            // Client disconnected — no trailer possible
+            // Client disconnected — no footer possible
         }
         catch (Exception ex)
         {
             output.WriteNdjsonLine(
-                new NdjsonTrailer { Status = "error", Count = count, Error = ex.Message },
-                SampleJsonContext.Default.NdjsonTrailer
+                NdjsonEnvelope.CreateErrorFooter(streamId, count, ex.Message),
+                SampleJsonContext.Default.NdjsonEnvelope
             );
         }
 
@@ -394,6 +396,8 @@ app.MapGet(
         );
 
         var output = ctx.Response.BodyWriter;
+        var (header, streamId) = NdjsonEnvelope.CreateHeader();
+        output.WriteNdjsonLine(header, SampleJsonContext.Default.NdjsonEnvelope);
         int count = 0;
 
         try
@@ -416,19 +420,19 @@ app.MapGet(
             );
 
             output.WriteNdjsonLine(
-                new NdjsonTrailer { Status = "complete", Count = count },
-                SampleJsonContext.Default.NdjsonTrailer
+                NdjsonEnvelope.CreateFooter(streamId, count),
+                SampleJsonContext.Default.NdjsonEnvelope
             );
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            // Client disconnected
+            // Client disconnected — no footer possible
         }
         catch (Exception ex)
         {
             output.WriteNdjsonLine(
-                new NdjsonTrailer { Status = "error", Count = count, Error = ex.Message },
-                SampleJsonContext.Default.NdjsonTrailer
+                NdjsonEnvelope.CreateErrorFooter(streamId, count, ex.Message),
+                SampleJsonContext.Default.NdjsonEnvelope
             );
         }
 
@@ -728,16 +732,35 @@ public sealed record ProductOutput
 }
 
 /// <summary>
-/// NDJSON trailer — always the last line. Clients check for __status field
-/// to distinguish data lines from the completion/error signal.
+/// NDJSON envelope — first and last line of the stream.
+/// Header: {"__stream":"begin","streamId":"...","version":1}
+/// Footer: {"__stream":"end","streamId":"...","count":N}
+/// Error:  {"__stream":"end","streamId":"...","count":N,"error":"..."}
+///
+/// The streamId is a random GUID that must match between header and footer.
+/// Clients verify the footer's streamId matches the header to detect corruption.
 /// </summary>
-public sealed record NdjsonTrailer
+public sealed record NdjsonEnvelope
 {
-    [JsonPropertyName("__status")]
-    public string Status { get; init; } = "";
+    [JsonPropertyName("__stream")]
+    public string Stream { get; init; } = "";
 
-    public int Count { get; init; }
+    public string StreamId { get; init; } = "";
+    public int? Version { get; init; }
+    public int? Count { get; init; }
     public string? Error { get; init; }
+
+    public static (NdjsonEnvelope Header, string Id) CreateHeader()
+    {
+        var id = Guid.NewGuid().ToString("N");
+        return (new NdjsonEnvelope { Stream = "begin", StreamId = id, Version = 1 }, id);
+    }
+
+    public static NdjsonEnvelope CreateFooter(string streamId, int count) =>
+        new() { Stream = "end", StreamId = streamId, Count = count };
+
+    public static NdjsonEnvelope CreateErrorFooter(string streamId, int count, string error) =>
+        new() { Stream = "end", StreamId = streamId, Count = count, Error = error };
 }
 
 public sealed record Photo
@@ -756,5 +779,5 @@ public sealed record Photo
 [JsonSerializable(typeof(ProductInput))]
 [JsonSerializable(typeof(ProductOutput))]
 [JsonSerializable(typeof(Photo))]
-[JsonSerializable(typeof(NdjsonTrailer))]
+[JsonSerializable(typeof(NdjsonEnvelope))]
 public partial class SampleJsonContext : JsonSerializerContext;
