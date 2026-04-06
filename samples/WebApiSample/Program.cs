@@ -24,11 +24,11 @@ app.MapGet(
             ),
             HttpCompletionOption.ResponseHeadersRead
         );
-        var stream = await upstream.Content.ReadAsStreamAsync();
+        await using var stream = await upstream.Content.ReadAsStreamAsync();
         var pipe = PipeReader.Create(stream, new StreamPipeReaderOptions(bufferSize: 8192));
 
         var pipeWriter = ctx.Response.BodyWriter;
-        using var writer = new Utf8JsonWriter(pipeWriter);
+        await using var writer = new Utf8JsonWriter(pipeWriter);
         var options = new WriteOptions
         {
             AsyncFlush = async ct => { await pipeWriter.FlushAsync(ct); },
@@ -58,7 +58,7 @@ app.MapGet(
 // Nested array at $.products. Transform: keep only id, title, price, rating.
 app.MapGet(
     "/stream/products",
-    async (HttpContext ctx, IHttpClientFactory httpFactory, int limit = 100) =>
+    async Task (HttpContext ctx, IHttpClientFactory httpFactory, int limit = 100) =>
     {
         ctx.Response.ContentType = "application/json";
         ctx.Features.Get<IHttpResponseBodyFeature>()?.DisableBuffering();
@@ -75,7 +75,7 @@ app.MapGet(
         var pipe = PipeReader.Create(stream, new StreamPipeReaderOptions(bufferSize: 8192));
 
         var pipeWriter = ctx.Response.BodyWriter;
-        using var writer = new Utf8JsonWriter(pipeWriter);
+        await using var writer = new Utf8JsonWriter(pipeWriter);
         var options = new WriteOptions
         {
             AsyncFlush = async ct => { await pipeWriter.FlushAsync(ct); },
@@ -114,7 +114,8 @@ app.MapGet(
 );
 
 // ── GET /stream/photos — stream 5000 photos, filter by albumId ─────────
-// Root-level array, caller-side filtering. Only emit photos from album 1.
+// Root-level array, caller-side filtering via WriteArrayAsync transform.
+// The delegate writes only matching items — skipped items produce no output.
 app.MapGet(
     "/stream/photos",
     async (HttpContext ctx, IHttpClientFactory httpFactory, int albumId = 1) =>
@@ -134,7 +135,7 @@ app.MapGet(
         var pipe = PipeReader.Create(stream, new StreamPipeReaderOptions(bufferSize: 8192));
 
         var pipeWriter = ctx.Response.BodyWriter;
-        using var writer = new Utf8JsonWriter(pipeWriter);
+        await using var writer = new Utf8JsonWriter(pipeWriter);
         var options = new WriteOptions
         {
             AsyncFlush = async ct => { await pipeWriter.FlushAsync(ct); },
@@ -144,18 +145,20 @@ app.MapGet(
         writer.WriteStartArray("photos"u8);
 
         int written = 0;
-        await JsonStreamReader.ProcessArrayAsync(
+        await JsonStreamReader.WriteArrayAsync(
             pipe,
             JsonPath.Root,
-            itemBytes =>
+            writer,
+            (itemBytes, w) =>
             {
                 using var doc = JsonDocument.Parse(itemBytes);
                 if (doc.RootElement.GetProperty("albumId").GetInt32() == albumId)
                 {
-                    doc.RootElement.WriteTo(writer);
+                    doc.RootElement.WriteTo(w);
                     written++;
                 }
-            }
+            },
+            options
         );
 
         writer.WriteEndArray();
@@ -172,7 +175,7 @@ app.MapGet(
 // Simulates paginated upstream by fetching multiple pages and flattening.
 app.MapGet(
     "/stream/todos",
-    async (HttpContext ctx, IHttpClientFactory httpFactory) =>
+    async Task (HttpContext ctx, IHttpClientFactory httpFactory) =>
     {
         ctx.Response.ContentType = "application/json";
         ctx.Features.Get<IHttpResponseBodyFeature>()?.DisableBuffering();
@@ -197,7 +200,7 @@ app.MapGet(
 
         var path = JsonPath.Root.Property("pages"u8).Each().Property("todos"u8);
         var pipeWriter = ctx.Response.BodyWriter;
-        using var writer = new Utf8JsonWriter(pipeWriter);
+        await using var writer = new Utf8JsonWriter(pipeWriter);
         var options = new WriteOptions
         {
             AsyncFlush = async ct => { await pipeWriter.FlushAsync(ct); },

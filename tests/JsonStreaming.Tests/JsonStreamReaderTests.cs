@@ -443,7 +443,7 @@ public class JsonStreamReaderTests
     {
         var pipe = ToPipe("""{"items":[{"a":1},{"a":2}]}""");
         var output = new ArrayBufferWriter<byte>();
-        using var writer = new Utf8JsonWriter(output);
+        await using var writer = new Utf8JsonWriter(output);
 
         writer.WriteStartArray();
         var count = await JsonStreamReader.WriteArrayAsync(pipe, "items", writer);
@@ -464,7 +464,7 @@ public class JsonStreamReaderTests
             """{"items":[{"name":"alice","age":30,"internal":"x"},{"name":"bob","age":25,"internal":"y"}]}"""
         );
         var output = new ArrayBufferWriter<byte>();
-        using var writer = new Utf8JsonWriter(output);
+        await using var writer = new Utf8JsonWriter(output);
 
         writer.WriteStartArray();
         await JsonStreamReader.WriteArrayAsync(
@@ -499,7 +499,7 @@ public class JsonStreamReaderTests
         var path = JsonPath.Root.Property("pages"u8).Each().Property("items"u8);
 
         var output = new ArrayBufferWriter<byte>();
-        using var writer = new Utf8JsonWriter(output);
+        await using var writer = new Utf8JsonWriter(output);
 
         writer.WriteStartArray();
         var count = await JsonStreamReader.WriteArrayAsync(pipe, path, writer);
@@ -519,7 +519,7 @@ public class JsonStreamReaderTests
     {
         var pipe = ToPipe("""{"items":[]}""");
         var output = new ArrayBufferWriter<byte>();
-        using var writer = new Utf8JsonWriter(output);
+        await using var writer = new Utf8JsonWriter(output);
 
         writer.WriteStartArray();
         var count = await JsonStreamReader.WriteArrayAsync(pipe, "items", writer);
@@ -539,7 +539,7 @@ public class JsonStreamReaderTests
         var pipe = ToPipe(json, bufferSize: 4096);
 
         var output = new ArrayBufferWriter<byte>();
-        using var writer = new Utf8JsonWriter(output);
+        await using var writer = new Utf8JsonWriter(output);
 
         writer.WriteStartArray();
         var count = await JsonStreamReader.WriteArrayAsync(pipe, "items", writer);
@@ -563,7 +563,7 @@ public class JsonStreamReaderTests
         var pipe = ToPipe(json);
 
         var flushCounter = new FlushCountingBufferWriter();
-        using var writer = new Utf8JsonWriter(flushCounter);
+        await using var writer = new Utf8JsonWriter(flushCounter);
         var options = new WriteOptions { FlushThreshold = 500 };
 
         writer.WriteStartArray();
@@ -585,7 +585,7 @@ public class JsonStreamReaderTests
         var pipe = ToPipe(json);
 
         var flushCounter = new FlushCountingBufferWriter();
-        using var writer = new Utf8JsonWriter(flushCounter);
+        await using var writer = new Utf8JsonWriter(flushCounter);
         var options = new WriteOptions { FlushThreshold = 0 }; // disabled
 
         writer.WriteStartArray();
@@ -614,7 +614,7 @@ public class JsonStreamReaderTests
         var path = JsonPath.Root.Property("data"u8).Each().Property("items"u8);
 
         var flushCounter = new FlushCountingBufferWriter();
-        using var writer = new Utf8JsonWriter(flushCounter);
+        await using var writer = new Utf8JsonWriter(flushCounter);
         var options = new WriteOptions { FlushThreshold = 300 };
 
         writer.WriteStartArray();
@@ -638,7 +638,7 @@ public class JsonStreamReaderTests
         var pipe = ToPipe(json);
 
         var output = new ArrayBufferWriter<byte>();
-        using var writer = new Utf8JsonWriter(output);
+        await using var writer = new Utf8JsonWriter(output);
 
         int asyncFlushCount = 0;
         var options = new WriteOptions
@@ -681,7 +681,7 @@ public class JsonStreamReaderTests
         var path = JsonPath.Root.Property("data"u8).Each().Property("items"u8);
 
         var output = new ArrayBufferWriter<byte>();
-        using var writer = new Utf8JsonWriter(output);
+        await using var writer = new Utf8JsonWriter(output);
 
         int asyncFlushCount = 0;
         var options = new WriteOptions

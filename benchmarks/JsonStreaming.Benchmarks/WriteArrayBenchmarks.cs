@@ -36,7 +36,7 @@ public class WriteArrayBenchmarks
     public async Task<int> Write_Verbatim()
     {
         var pipe = ToPipe(_json);
-        using var writer = new Utf8JsonWriter(Stream.Null, SkipValidation);
+        await using var writer = new Utf8JsonWriter(Stream.Null, SkipValidation);
         writer.WriteStartArray();
         var count = await JsonStreamReader.WriteArrayAsync(pipe, "messages", writer);
         writer.WriteEndArray();
@@ -49,7 +49,7 @@ public class WriteArrayBenchmarks
     public async Task<int> Write_Transform()
     {
         var pipe = ToPipe(_json);
-        using var writer = new Utf8JsonWriter(Stream.Null, SkipValidation);
+        await using var writer = new Utf8JsonWriter(Stream.Null, SkipValidation);
         writer.WriteStartArray();
         var count = await JsonStreamReader.WriteArrayAsync(
             pipe,
@@ -74,7 +74,7 @@ public class WriteArrayBenchmarks
     public async Task<int> Write_VerbatimWithFlush()
     {
         var pipe = ToPipe(_json);
-        using var writer = new Utf8JsonWriter(Stream.Null, SkipValidation);
+        await using var writer = new Utf8JsonWriter(Stream.Null, SkipValidation);
         writer.WriteStartArray();
         var count = await JsonStreamReader.WriteArrayAsync(
             pipe,
@@ -106,7 +106,7 @@ public class WriteArrayBenchmarks
     public async Task<int> Flush_Disabled()
     {
         var pipe = ToPipe(_json);
-        using var writer = new Utf8JsonWriter(Stream.Null, SkipValidation);
+        await using var writer = new Utf8JsonWriter(Stream.Null, SkipValidation);
         writer.WriteStartArray();
         var count = await JsonStreamReader.WriteArrayAsync(
             pipe,
@@ -124,7 +124,7 @@ public class WriteArrayBenchmarks
     public async Task<int> Flush_4KB()
     {
         var pipe = ToPipe(_json);
-        using var writer = new Utf8JsonWriter(Stream.Null, SkipValidation);
+        await using var writer = new Utf8JsonWriter(Stream.Null, SkipValidation);
         writer.WriteStartArray();
         var count = await JsonStreamReader.WriteArrayAsync(
             pipe,
@@ -146,7 +146,7 @@ public class WriteArrayBenchmarks
     public async Task<int> Flush_16KB()
     {
         var pipe = ToPipe(_json);
-        using var writer = new Utf8JsonWriter(Stream.Null, SkipValidation);
+        await using var writer = new Utf8JsonWriter(Stream.Null, SkipValidation);
         writer.WriteStartArray();
         var count = await JsonStreamReader.WriteArrayAsync(
             pipe,
@@ -168,7 +168,7 @@ public class WriteArrayBenchmarks
     public async Task<int> Flush_64KB()
     {
         var pipe = ToPipe(_json);
-        using var writer = new Utf8JsonWriter(Stream.Null, SkipValidation);
+        await using var writer = new Utf8JsonWriter(Stream.Null, SkipValidation);
         writer.WriteStartArray();
         var count = await JsonStreamReader.WriteArrayAsync(
             pipe,
