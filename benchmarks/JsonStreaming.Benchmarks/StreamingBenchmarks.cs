@@ -18,7 +18,7 @@ namespace JsonStreaming.Benchmarks;
 [Orderer(SummaryOrderPolicy.FastestToSlowest)]
 public class StreamingBenchmarks
 {
-    [Params(1_000)]
+    [Params(100_000)]
     public int ItemCount { get; set; }
 
     private byte[] _json = [];
@@ -155,9 +155,34 @@ public class StreamingBenchmarks
         return count;
     }
 
-    // ── 7. Typed transform via source-gen ─────────────────────────────────
+    // ── 7. Typed direct-write (deserialize TIn, write directly, no TOut) ──
 
-    [Benchmark(Description = "WriteArray: typed transform (source-gen)")]
+    [Benchmark(Description = "WriteArray: typed direct-write (no TOut alloc)")]
+    public async Task<int> Write_TypedDirectWrite()
+    {
+        var pipe = ToPipe(_json);
+        await using var writer = new Utf8JsonWriter(Stream.Null, SkipValidation);
+        writer.WriteStartArray();
+        var count = await JsonStreamReaderTyped.WriteArrayAsync(
+            pipe,
+            "items",
+            writer,
+            BenchJsonContext.Default.BenchItem,
+            (item, w) =>
+            {
+                w.WriteStartObject();
+                w.WriteNumber("id"u8, item.Id);
+                w.WriteString("title"u8, item.Title);
+                w.WriteEndObject();
+            }
+        );
+        writer.WriteEndArray();
+        return count;
+    }
+
+    // ── 8. Typed transform (TIn → TOut, both allocated) ────────────────────
+
+    [Benchmark(Description = "WriteArray: typed transform (TIn → TOut)")]
     public async Task<int> Write_TypedTransform()
     {
         var pipe = ToPipe(_json);
@@ -175,9 +200,9 @@ public class StreamingBenchmarks
         return count;
     }
 
-    // ── 8. Typed verbatim via source-gen (deserialize + serialize same type)
+    // ── 9. Typed verbatim (raw passthrough, no deserialize) ────────────────
 
-    [Benchmark(Description = "WriteArray: typed verbatim (source-gen)")]
+    [Benchmark(Description = "WriteArray: typed verbatim (raw passthrough)")]
     public async Task<int> Write_TypedVerbatim()
     {
         var pipe = ToPipe(_json);

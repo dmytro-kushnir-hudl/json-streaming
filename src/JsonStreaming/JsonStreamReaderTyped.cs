@@ -51,9 +51,16 @@ public static class JsonStreamReaderTyped
         JsonTypeInfo<T> typeInfo,
         Action<T> processItem,
         CancellationToken ct = default
-    ) => ProcessArrayAsync(pipeReader, JsonPathNavigator.ParseDotPath(path), typeInfo, processItem, ct);
+    ) =>
+        ProcessArrayAsync(
+            pipeReader,
+            JsonPathNavigator.ParseDotPath(path),
+            typeInfo,
+            processItem,
+            ct
+        );
 
-    // ── Typed write-through (transform) ────────────────────────────────────
+    // ── Typed write-through (TIn → TOut) ───────────────────────────────────
 
     /// <summary>
     /// Deserializes each item as <typeparamref name="TIn"/>, transforms it to
@@ -71,7 +78,8 @@ public static class JsonStreamReaderTyped
         JsonTypeInfo<TOut> outputType,
         Func<TIn, TOut?> transform,
         CancellationToken ct = default
-    ) => WriteArrayAsync(pipeReader, path, writer, inputType, outputType, transform, WriteOptions.Default, ct);
+    ) =>
+        WriteArrayAsync(pipeReader, path, writer, inputType, outputType, transform, WriteOptions.Default, ct);
 
     /// <summary>
     /// Typed write-through with explicit <see cref="WriteOptions"/>.
@@ -116,7 +124,8 @@ public static class JsonStreamReaderTyped
         JsonTypeInfo<TOut> outputType,
         Func<TIn, TOut?> transform,
         CancellationToken ct = default
-    ) => WriteArrayAsync(pipeReader, JsonPathNavigator.ParseDotPath(path), writer, inputType, outputType, transform, ct);
+    ) =>
+        WriteArrayAsync(pipeReader, JsonPathNavigator.ParseDotPath(path), writer, inputType, outputType, transform, ct);
 
     /// <summary>
     /// Convenience overload: dot-separated path + explicit options.
@@ -130,15 +139,91 @@ public static class JsonStreamReaderTyped
         Func<TIn, TOut?> transform,
         WriteOptions options,
         CancellationToken ct = default
-    ) => WriteArrayAsync(pipeReader, JsonPathNavigator.ParseDotPath(path), writer, inputType, outputType, transform, options, ct);
+    ) =>
+        WriteArrayAsync(pipeReader, JsonPathNavigator.ParseDotPath(path), writer, inputType, outputType, transform, options, ct);
 
-    // ── Typed verbatim write (same type in and out) ────────────────────────
+    // ── Typed direct-write (TIn → write directly, no TOut allocation) ──────
 
     /// <summary>
-    /// Deserializes each item as <typeparamref name="T"/> and serializes it
-    /// back to <paramref name="writer"/>. Useful for re-serializing with
-    /// different <see cref="JsonSerializerOptions"/> (e.g. camelCase output
-    /// from PascalCase source).
+    /// Deserializes each item as <typeparamref name="T"/> and passes it with the
+    /// <see cref="Utf8JsonWriter"/> to <paramref name="writeItem"/>. The caller
+    /// writes directly to the writer — no output type allocation.
+    ///
+    /// This is the sweet spot: type-safe input + zero output allocation.
+    /// </summary>
+    public static Task<int> WriteArrayAsync<T>(
+        PipeReader pipeReader,
+        JsonPath path,
+        Utf8JsonWriter writer,
+        JsonTypeInfo<T> inputType,
+        Action<T, Utf8JsonWriter> writeItem,
+        CancellationToken ct = default
+    ) =>
+        WriteArrayAsync(pipeReader, path, writer, inputType, writeItem, WriteOptions.Default, ct);
+
+    /// <summary>
+    /// Typed direct-write with explicit <see cref="WriteOptions"/>.
+    /// </summary>
+    public static Task<int> WriteArrayAsync<T>(
+        PipeReader pipeReader,
+        JsonPath path,
+        Utf8JsonWriter writer,
+        JsonTypeInfo<T> inputType,
+        Action<T, Utf8JsonWriter> writeItem,
+        WriteOptions options,
+        CancellationToken ct = default
+    ) =>
+        JsonStreamReader.WriteArrayAsync(
+            pipeReader,
+            path,
+            writer,
+            (itemBytes, w) =>
+            {
+                var reader = new Utf8JsonReader(itemBytes);
+                var input = JsonSerializer.Deserialize(ref reader, inputType);
+                if (input is not null)
+                    writeItem(input, w);
+            },
+            options,
+            ct
+        );
+
+    /// <summary>
+    /// Convenience overload accepting a dot-separated path string.
+    /// </summary>
+    public static Task<int> WriteArrayAsync<T>(
+        PipeReader pipeReader,
+        string path,
+        Utf8JsonWriter writer,
+        JsonTypeInfo<T> inputType,
+        Action<T, Utf8JsonWriter> writeItem,
+        CancellationToken ct = default
+    ) =>
+        WriteArrayAsync(pipeReader, JsonPathNavigator.ParseDotPath(path), writer, inputType, writeItem, ct);
+
+    /// <summary>
+    /// Convenience overload: dot-separated path + explicit options.
+    /// </summary>
+    public static Task<int> WriteArrayAsync<T>(
+        PipeReader pipeReader,
+        string path,
+        Utf8JsonWriter writer,
+        JsonTypeInfo<T> inputType,
+        Action<T, Utf8JsonWriter> writeItem,
+        WriteOptions options,
+        CancellationToken ct = default
+    ) =>
+        WriteArrayAsync(pipeReader, JsonPathNavigator.ParseDotPath(path), writer, inputType, writeItem, options, ct);
+
+    // ── Typed verbatim (passthrough raw bytes, no deserialize) ─────────────
+
+    /// <summary>
+    /// Writes each item's raw bytes directly to <paramref name="writer"/>
+    /// without deserialization. Use when you just need verbatim passthrough
+    /// with type-safe API consistency.
+    ///
+    /// Previously this deserialized + re-serialized — now it skips the
+    /// round-trip entirely and copies raw bytes via <see cref="JsonDocument"/>.
     /// </summary>
     public static Task<int> WriteArrayAsync<T>(
         PipeReader pipeReader,
@@ -146,7 +231,9 @@ public static class JsonStreamReaderTyped
         Utf8JsonWriter writer,
         JsonTypeInfo<T> typeInfo,
         CancellationToken ct = default
-    ) => WriteArrayAsync(pipeReader, path, writer, typeInfo, typeInfo, item => item, ct);
+    ) =>
+        // Skip deserialize/serialize round-trip — just copy raw bytes
+        JsonStreamReader.WriteArrayAsync(pipeReader, path, writer, ct);
 
     /// <summary>
     /// Convenience overload accepting a dot-separated path string.
@@ -157,5 +244,6 @@ public static class JsonStreamReaderTyped
         Utf8JsonWriter writer,
         JsonTypeInfo<T> typeInfo,
         CancellationToken ct = default
-    ) => WriteArrayAsync(pipeReader, JsonPathNavigator.ParseDotPath(path), writer, typeInfo, ct);
+    ) =>
+        WriteArrayAsync(pipeReader, JsonPathNavigator.ParseDotPath(path), writer, typeInfo, ct);
 }
