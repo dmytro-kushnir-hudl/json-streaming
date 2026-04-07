@@ -79,47 +79,44 @@ static async Task<int> RunOnce(byte[] json)
         Stream.Null,
         new JsonWriterOptions { SkipValidation = true }
     );
-    var options = new WriteOptions
-    {
-        FlushThreshold = 16_384,
-        AsyncFlush = _ => ValueTask.CompletedTask,
-    };
 
     writer.WriteStartArray();
 
-    var count = await JsonStreamReader.WriteArrayAsync(
-        pipe,
-        "items",
-        writer,
-        (itemBytes, w) =>
+    int count = 0;
+    await pipe.ProjectItemsAsync(
+        NdJsonPath.At("items"),
+        PipeWriter.Create(Stream.Null),
+        (itemBytes, _) =>
         {
             var reader = new Utf8JsonReader(itemBytes);
             reader.Read(); // StartObject
-            w.WriteStartObject();
+            writer.WriteStartObject();
             while (reader.Read() && reader.TokenType == JsonTokenType.PropertyName)
             {
                 if (reader.ValueTextEquals("id"u8))
                 {
                     reader.Read();
-                    w.WriteNumber("id"u8, reader.GetInt32());
+                    writer.WriteNumber("id"u8, reader.GetInt32());
                 }
                 else if (reader.ValueTextEquals("title"u8))
                 {
                     reader.Read();
-                    w.WritePropertyName("title"u8);
+                    writer.WritePropertyName("title"u8);
                     if (!reader.HasValueSequence && !reader.ValueIsEscaped)
-                        w.WriteStringValue(reader.ValueSpan);
+                        writer.WriteStringValue(reader.ValueSpan);
                     else
-                        w.WriteStringValue(reader.GetString());
+                        writer.WriteStringValue(reader.GetString());
                 }
                 else
                 {
                     reader.Skip();
                 }
             }
-            w.WriteEndObject();
+            writer.WriteEndObject();
+            count++;
+            return ValueTask.CompletedTask;
         },
-        options
+        ct: default
     );
 
     writer.WriteEndArray();

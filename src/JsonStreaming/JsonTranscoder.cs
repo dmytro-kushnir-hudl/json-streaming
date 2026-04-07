@@ -16,7 +16,7 @@ namespace JsonStreaming;
 /// </list>
 ///
 /// All methods respect backpressure: they flush to the writer when the unflushed
-/// buffer exceeds 16 KB, matching <see cref="WriteOptions.FlushThreshold"/>.
+/// buffer exceeds 16 KB.
 /// </summary>
 public static class JsonTranscoder
 {
@@ -257,8 +257,8 @@ public static class JsonTranscoder
                     buffer, result.IsCompleted, state.ReaderState);
 
                 long consumedUpTo = 0;
-                bool itemFound = false;
-                ReadOnlySequence<byte> itemSlice = default;
+                bool needsAsyncBreak = false;
+                ValueTask pendingTask = default;
 
                 bool hasToken = jsonReader.Read();
                 while (hasToken)
@@ -278,20 +278,20 @@ public static class JsonTranscoder
                             ArrayPool<byte>.Shared.Return(rentedName);
                     }
 
+                    ReadOnlySequence<byte> itemSlice;
+
                     switch (directive)
                     {
                         case ParserDirective.Skip:
-                            break;
+                            hasToken = jsonReader.Read();
+                            continue;
 
                         case ParserDirective.YieldValue:
                         {
                             long start = jsonReader.TokenStartIndex;
                             long length = jsonReader.BytesConsumed - start;
                             itemSlice = buffer.Slice(buffer.GetPosition(start), length);
-                            consumedUpTo = jsonReader.BytesConsumed;
-                            state.ReaderState = jsonReader.CurrentState;
-                            itemFound = true;
-                            goto exitSyncLoop;
+                            break;
                         }
 
                         case ParserDirective.BeginCapture:
@@ -299,7 +299,8 @@ public static class JsonTranscoder
                             continue; // don't advance reader
 
                         case ParserDirective.Capture:
-                            break;
+                            hasToken = jsonReader.Read();
+                            continue;
 
                         case ParserDirective.EndCapture:
                         {
@@ -307,7 +308,6 @@ public static class JsonTranscoder
 
                             if (accumulatedLength > 0)
                             {
-                                // Multi-chunk item — append final portion
                                 int finalLen = (int)(endPos - captureStartIndex);
                                 EnsureAccumulator(ref accumulator, accumulatedLength + finalLen);
                                 buffer.Slice(buffer.GetPosition(captureStartIndex), finalLen)
@@ -319,27 +319,55 @@ public static class JsonTranscoder
                             }
                             else
                             {
-                                // Single-chunk item — zero-copy slice
                                 itemSlice = buffer.Slice(
                                     buffer.GetPosition(captureStartIndex),
                                     endPos - captureStartIndex);
                             }
 
                             captureStartIndex = -1;
-                            consumedUpTo = endPos;
-                            state.ReaderState = jsonReader.CurrentState;
-                            itemFound = true;
-                            goto exitSyncLoop;
+                            break;
                         }
+
+                        default:
+                            hasToken = jsonReader.Read();
+                            continue;
                     }
 
-                    hasToken = jsonReader.Read();
+                    // ── Item found — call processItem ─────────────────────
+                    var task = processItem(itemSlice, writer);
+                    accumulatedLength = 0;
+
+                    if (task.IsCompletedSuccessfully)
+                    {
+                        // Fast path: callback completed synchronously.
+                        // Stay in the sync loop — process next token from same buffer.
+                        hasToken = jsonReader.Read();
+                        continue;
+                    }
+
+                    // Slow path: callback is truly async.
+                    // Save state and break out to await.
+                    consumedUpTo = jsonReader.BytesConsumed;
+                    state.ReaderState = jsonReader.CurrentState;
+                    pendingTask = task;
+                    needsAsyncBreak = true;
+                    break;
                 }
 
-                // End of tokens in this chunk
+                if (needsAsyncBreak)
+                {
+                    // Await the async callback, then advance and continue
+                    await pendingTask;
+                    reader.AdvanceTo(buffer.GetPosition(consumedUpTo), buffer.End);
+
+                    if (writer is { CanGetUnflushedBytes: true, UnflushedBytes: >= FlushThreshold })
+                        await writer.FlushAsync(ct);
+                    continue;
+                }
+
+                // End of tokens in this chunk — no pending item
                 if (captureStartIndex >= 0)
                 {
-                    // Capture in progress — accumulate bytes and advance
                     int captureLen = (int)(jsonReader.BytesConsumed - captureStartIndex);
                     if (captureLen > 0)
                     {
@@ -357,24 +385,6 @@ public static class JsonTranscoder
 
                 if (result.IsCompleted)
                     break;
-                continue;
-
-            exitSyncLoop:
-                if (itemFound)
-                {
-                    // Call processItem BEFORE AdvanceTo — the itemSlice may
-                    // reference the buffer which AdvanceTo would release.
-                    await processItem(itemSlice, writer);
-                    accumulatedLength = 0;
-                }
-
-                reader.AdvanceTo(buffer.GetPosition(consumedUpTo), buffer.End);
-
-                if (itemFound && writer is { CanGetUnflushedBytes: true, UnflushedBytes: >= FlushThreshold })
-                    await writer.FlushAsync(ct);
-
-                // Don't break here — there may be more items in the remaining buffer.
-                // The next ReadAsync will return remaining data even if IsCompleted.
             }
         }
         finally

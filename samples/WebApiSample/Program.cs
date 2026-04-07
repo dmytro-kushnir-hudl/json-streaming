@@ -11,16 +11,15 @@ builder.Services.AddHttpClient();
 var app = builder.Build();
 
 // ════════════════════════════════════════════════════════════════════════
-// LEVEL 1 — Highest abstraction: JsonStreamPipeline
+// LEVEL 1 — Envelope helpers using ProjectItemsAsync
 //
-// One call does everything: envelope, flush, backpressure, error recovery.
-// You provide: input pipe, path, output pipe, types, transform lambda.
-// Trade-off: least control, but fewest ways to get it wrong.
+// Build the JSON envelope manually, then use ProjectItemsAsync to write
+// each matched item as a raw value into the array.
 // ════════════════════════════════════════════════════════════════════════
 
 // Passthrough — items flow verbatim from upstream to client.
 // CancellationToken is injected by ASP.NET minimal API from ctx.RequestAborted.
-// It flows through: HttpClient.SendAsync → PipeReader.ReadAsync → WriteArrayAsync → AsyncFlush.
+// It flows through: HttpClient.SendAsync → PipeReader.ReadAsync → ProjectItemsAsync.
 // If the client disconnects, the entire pipeline cancels.
 app.MapGet(
     "/level1/passthrough",
@@ -28,13 +27,30 @@ app.MapGet(
     {
         await using var upstream = await ctx.StreamFrom(httpFactory, "https://jsonplaceholder.typicode.com/comments", ct);
 
-        await JsonStreamPipeline.PassthroughArrayAsync(
-            upstream.Pipe,
+        var output = ctx.Response.BodyWriter;
+        await using var writer = new Utf8JsonWriter(output);
+
+        writer.WriteStartObject();
+        writer.WriteStartArray("comments"u8);
+
+        int count = 0;
+        await upstream.Pipe.ProjectItemsAsync(
             NdJsonPath.Root,
-            ctx.Response.BodyWriter,
-            "comments",
-            ct
+            output,
+            (itemBytes, pw) =>
+            {
+                writer.WriteRawValue(itemBytes, skipInputValidation: true);
+                count++;
+                return ValueTask.CompletedTask;
+            },
+            ct: ct
         );
+
+        writer.WriteEndArray();
+        writer.WriteNumber("count"u8, count);
+        writer.WriteEndObject();
+        await writer.FlushAsync(ct);
+        await output.FlushAsync(ct);
     }
 );
 
@@ -49,14 +65,18 @@ app.MapGet(
             ct
         );
 
-        await JsonStreamPipeline.TransformArrayAsync(
-            upstream.Pipe,
-            "products",
-            ctx.Response.BodyWriter,
-            "products",
+        var output = ctx.Response.BodyWriter;
+        await using var writer = new Utf8JsonWriter(output);
+
+        writer.WriteStartObject();
+        writer.WriteStartArray("products"u8);
+
+        var count = await upstream.Pipe.ProjectTypedAsync(
+            NdJsonPath.At("products"),
+            writer,
             SampleJsonContext.Default.ProductInput,
             SampleJsonContext.Default.ProductOutput,
-            product => new ProductOutput
+            product => [new ProductOutput
             {
                 Id = product.Id,
                 Title = product.Title,
@@ -68,13 +88,19 @@ app.MapGet(
                 ),
                 Rating = product.Rating,
                 InStock = product.Stock > 0,
-            },
+            }],
             ct
         );
+
+        writer.WriteEndArray();
+        writer.WriteNumber("count"u8, count);
+        writer.WriteEndObject();
+        await writer.FlushAsync(ct);
+        await output.FlushAsync(ct);
     }
 );
 
-// Filter — return null to skip items.
+// Filter — return empty to skip items.
 app.MapGet(
     "/level1/filter",
     async (HttpContext ctx, IHttpClientFactory httpFactory, CancellationToken ct, int albumId = 1) =>
@@ -85,30 +111,40 @@ app.MapGet(
             ct
         );
 
-        await JsonStreamPipeline.TransformArrayAsync(
-            upstream.Pipe,
+        var output = ctx.Response.BodyWriter;
+        await using var writer = new Utf8JsonWriter(output);
+
+        writer.WriteStartObject();
+        writer.WriteStartArray("photos"u8);
+
+        var count = await upstream.Pipe.ProjectTypedAsync(
             NdJsonPath.Root,
-            ctx.Response.BodyWriter,
-            "photos",
+            writer,
             SampleJsonContext.Default.Photo,
             SampleJsonContext.Default.Photo,
-            photo => photo.AlbumId == albumId ? photo : null,
+            photo => photo.AlbumId == albumId ? [photo] : [],
             ct
         );
+
+        writer.WriteEndArray();
+        writer.WriteNumber("count"u8, count);
+        writer.WriteEndObject();
+        await writer.FlushAsync(ct);
+        await output.FlushAsync(ct);
     }
 );
 
 // ════════════════════════════════════════════════════════════════════════
-// LEVEL 2 — Mid-level: JsonStreamReaderTyped
+// LEVEL 2 — Mid-level: ProjectTypedAsync with custom envelope
 //
-// You own the Utf8JsonWriter and the JSON envelope. The library handles
-// deserialization/serialization via source-gen JsonTypeInfo<T>.
+// You own the Utf8JsonWriter and the JSON envelope. The extension method
+// handles deserialization/serialization via source-gen JsonTypeInfo<T>.
 // Trade-off: more control over output structure, but you manage
 // writer lifecycle, envelope, and flush yourself.
 // ════════════════════════════════════════════════════════════════════════
 
 // Typed transform with custom envelope — add metadata fields, nest differently.
-// Use when: Pipeline doesn't match your output shape.
+// Use when: you need a custom output shape.
 app.MapGet(
     "/level2/typed",
     async (HttpContext ctx, IHttpClientFactory httpFactory, CancellationToken ct, int limit = 30) =>
@@ -121,13 +157,6 @@ app.MapGet(
 
         var pipeWriter = ctx.Response.BodyWriter;
         await using var writer = new Utf8JsonWriter(pipeWriter);
-        var options = new WriteOptions
-        {
-            AsyncFlush = async flushCt =>
-            {
-                await pipeWriter.FlushAsync(flushCt);
-            },
-        };
 
         // Custom envelope: add request metadata alongside results
         writer.WriteStartObject();
@@ -135,13 +164,12 @@ app.MapGet(
         writer.WriteNumber("limit"u8, limit);
         writer.WriteStartArray("products"u8);
 
-        var count = await JsonStreamReaderTyped.WriteArrayAsync(
-            upstream.Pipe,
-            "products",
+        var count = await upstream.Pipe.ProjectTypedAsync(
+            NdJsonPath.At("products"),
             writer,
             SampleJsonContext.Default.ProductInput,
             SampleJsonContext.Default.ProductOutput,
-            product => new ProductOutput
+            product => [new ProductOutput
             {
                 Id = product.Id,
                 Title = product.Title,
@@ -153,8 +181,7 @@ app.MapGet(
                 ),
                 Rating = product.Rating,
                 InStock = product.Stock > 0,
-            },
-            options,
+            }],
             ct
         );
 
@@ -169,7 +196,7 @@ app.MapGet(
 );
 
 // ════════════════════════════════════════════════════════════════════════
-// LEVEL 3 — Low-level: JsonStreamReader.WriteArrayAsync + WriteItemDelegate
+// LEVEL 3 — Low-level: ProjectItemsAsync with raw byte callback
 //
 // You get raw bytes per item. You decide what to parse and what to write.
 // Trade-off: full control, but you handle Utf8JsonReader/JsonDocument yourself.
@@ -189,34 +216,28 @@ app.MapGet(
 
         var pipeWriter = ctx.Response.BodyWriter;
         await using var writer = new Utf8JsonWriter(pipeWriter);
-        var options = new WriteOptions
-        {
-            AsyncFlush = async flushCt =>
-            {
-                await pipeWriter.FlushAsync(flushCt);
-            },
-        };
 
         writer.WriteStartObject();
         writer.WriteStartArray("comments"u8);
 
-        var count = await JsonStreamReader.WriteArrayAsync(
-            upstream.Pipe,
+        int count = 0;
+        await upstream.Pipe.ProjectItemsAsync(
             NdJsonPath.Root,
-            writer,
-            (itemBytes, w) =>
+            PipeWriter.Create(Stream.Null),
+            (itemBytes, _) =>
             {
                 // Parse only what we need — skip 3 of 5 fields
                 using var doc = JsonDocument.Parse(itemBytes);
                 var root = doc.RootElement;
 
-                w.WriteStartObject();
-                w.WriteString("email"u8, root.GetProperty("email").GetString());
-                w.WriteString("body"u8, root.GetProperty("body").GetString());
-                w.WriteEndObject();
+                writer.WriteStartObject();
+                writer.WriteString("email"u8, root.GetProperty("email").GetString());
+                writer.WriteString("body"u8, root.GetProperty("body").GetString());
+                writer.WriteEndObject();
+                count++;
+                return ValueTask.CompletedTask;
             },
-            options,
-            ct
+            ct: ct
         );
 
         writer.WriteEndArray();
@@ -229,7 +250,7 @@ app.MapGet(
 );
 
 // ════════════════════════════════════════════════════════════════════════
-// LEVEL 4 — Lowest level: JsonStreamReader.ProcessArrayAsync + raw callback
+// LEVEL 4 — Lowest level: ForEachItemAsync + raw callback
 //
 // Zero-copy: you get ReadOnlySequence<byte> per item. No writer involved.
 // Trade-off: maximum performance and flexibility, but you handle everything.
@@ -250,9 +271,8 @@ app.MapGet(
         var brandCounts = new Dictionary<string, int>();
         double totalValue = 0;
 
-        await JsonStreamReader.ProcessArrayAsync(
-            upstream.Pipe,
-            "products",
+        await upstream.Pipe.ForEachItemAsync(
+            NdJsonPath.At("products"),
             itemBytes =>
             {
                 var reader = new Utf8JsonReader(itemBytes);
@@ -321,9 +341,8 @@ app.MapGet(
 
         try
         {
-            await JsonStreamReader.ProcessArrayAsync(
-                upstream.Pipe,
-                "products",
+            await upstream.Pipe.ForEachItemAsync(
+                NdJsonPath.At("products"),
                 itemBytes =>
                 {
                     var reader = new Utf8JsonReader(itemBytes);
@@ -402,8 +421,7 @@ app.MapGet(
 
         try
         {
-            await JsonStreamReader.ProcessArrayAsync(
-                upstream.Pipe,
+            await upstream.Pipe.ForEachItemAsync(
                 NdJsonPath.Root,
                 itemBytes =>
                 {
@@ -506,13 +524,30 @@ app.MapGet(
         // Deep path: navigate data → pages → [*] → todos
         var path = NdJsonPath.At("data").Key("pages").Each().Key("todos");
 
-        await JsonStreamPipeline.PassthroughArrayAsync(
-            pipe,
+        var output = ctx.Response.BodyWriter;
+        await using var writer = new Utf8JsonWriter(output);
+
+        writer.WriteStartObject();
+        writer.WriteStartArray("todos"u8);
+
+        int count = 0;
+        await pipe.ProjectItemsAsync(
             path,
-            ctx.Response.BodyWriter,
-            "todos",
-            ct
+            output,
+            (itemBytes, pw) =>
+            {
+                writer.WriteRawValue(itemBytes, skipInputValidation: true);
+                count++;
+                return ValueTask.CompletedTask;
+            },
+            ct: ct
         );
+
+        writer.WriteEndArray();
+        writer.WriteNumber("count"u8, count);
+        writer.WriteEndObject();
+        await writer.FlushAsync(ct);
+        await output.FlushAsync(ct);
 
         await pipe.CompleteAsync();
     }
@@ -531,17 +566,20 @@ app.MapGet(
 
         // DummyJSON wraps products in {"products": [...], "total": ...}
         // Navigate with NdJsonPath: $.products
-        // For deeper nesting, use: NdJsonPath.At("a").Key("b").Key("c")
         var path = NdJsonPath.At("products");
 
-        await JsonStreamPipeline.TransformArrayAsync(
-            upstream.Pipe,
+        var output = ctx.Response.BodyWriter;
+        await using var writer = new Utf8JsonWriter(output);
+
+        writer.WriteStartObject();
+        writer.WriteStartArray("items"u8);
+
+        var count = await upstream.Pipe.ProjectTypedAsync(
             path,
-            ctx.Response.BodyWriter,
-            "items",
+            writer,
             SampleJsonContext.Default.ProductInput,
             SampleJsonContext.Default.ProductOutput,
-            product => new ProductOutput
+            product => [new ProductOutput
             {
                 Id = product.Id,
                 Title = product.Title,
@@ -553,9 +591,15 @@ app.MapGet(
                 ),
                 Rating = product.Rating,
                 InStock = product.Stock > 0,
-            },
+            }],
             ct
         );
+
+        writer.WriteEndArray();
+        writer.WriteNumber("count"u8, count);
+        writer.WriteEndObject();
+        await writer.FlushAsync(ct);
+        await output.FlushAsync(ct);
     }
 );
 
@@ -573,22 +617,39 @@ app.MapGet(
         // Parse from NdJsonPath string — equivalent to NdJsonPath.At("products")
         var path = NdJsonPath.Parse("$.products");
 
-        await JsonStreamPipeline.PassthroughArrayAsync(
-            upstream.Pipe,
+        var output = ctx.Response.BodyWriter;
+        await using var writer = new Utf8JsonWriter(output);
+
+        writer.WriteStartObject();
+        writer.WriteStartArray("products"u8);
+
+        int count = 0;
+        await upstream.Pipe.ProjectItemsAsync(
             path,
-            ctx.Response.BodyWriter,
-            "products",
-            ct
+            output,
+            (itemBytes, pw) =>
+            {
+                writer.WriteRawValue(itemBytes, skipInputValidation: true);
+                count++;
+                return ValueTask.CompletedTask;
+            },
+            ct: ct
         );
+
+        writer.WriteEndArray();
+        writer.WriteNumber("count"u8, count);
+        writer.WriteEndObject();
+        await writer.FlushAsync(ct);
+        await output.FlushAsync(ct);
     }
 );
 
 // ════════════════════════════════════════════════════════════════════════
 // LEVEL 3+: Multi-source — sequential pages into one output array.
 //
-// Not possible with Pipeline (single input). Use WriteArrayAsync directly
-// with a shared writer across multiple PipeReaders.
-// Trade-off: most boilerplate, but handles patterns Pipeline can't.
+// Not possible with a single ProjectItemsAsync call. Use ProjectItemsAsync
+// directly with a shared writer across multiple PipeReaders.
+// Trade-off: most boilerplate, but handles patterns a single call can't.
 // ════════════════════════════════════════════════════════════════════════
 
 app.MapGet(
@@ -601,13 +662,6 @@ app.MapGet(
 
         var pipeWriter = ctx.Response.BodyWriter;
         await using var writer = new Utf8JsonWriter(pipeWriter);
-        var options = new WriteOptions
-        {
-            AsyncFlush = async flushCt =>
-            {
-                await pipeWriter.FlushAsync(flushCt);
-            },
-        };
 
         using var http = httpFactory.CreateClient();
 
@@ -631,13 +685,19 @@ app.MapGet(
                 new StreamPipeReaderOptions(bufferSize: 8192)
             );
 
-            totalCount += await JsonStreamReader.WriteArrayAsync(
-                pipe,
-                "todos",
-                writer,
-                options,
-                ct
+            int pageCount = 0;
+            await pipe.ProjectItemsAsync(
+                NdJsonPath.At("todos"),
+                pipeWriter,
+                (itemBytes, pw) =>
+                {
+                    writer.WriteRawValue(itemBytes, skipInputValidation: true);
+                    pageCount++;
+                    return ValueTask.CompletedTask;
+                },
+                ct: ct
             );
+            totalCount += pageCount;
 
             await pipe.CompleteAsync();
         }
