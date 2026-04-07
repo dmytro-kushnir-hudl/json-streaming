@@ -292,22 +292,6 @@ public static class JsonTranscoder
             for (int i = 0; i < depth; i++)
                 pw.Write("  "u8);
         }
-        
-        static void WriteIndent_2(PipeWriter pw, int depth)
-        {
-            int totalBytes = depth * 2;
-            while (totalBytes > 0)
-            {
-                // Ask for what's left, but the Pipe might give us a smaller 
-                // default segment size (e.g., 4096)
-                var span = pw.GetSpan(1); 
-                int writable = Math.Min(totalBytes, span.Length);
-        
-                span.Slice(0, writable).Fill((byte)' ');
-                pw.Advance(writable);
-                totalBytes -= writable;
-            }
-        }
     }
 
     // ── WriteMinified ─────────────────────────────────────────────────────────
@@ -370,8 +354,8 @@ public static class JsonTranscoder
             try
             {
                 ReadOnlySpan<byte> name = reader.TokenType == JsonTokenType.PropertyName
-                    ? GetPropertyName(ref reader, ref rentedBuffer)
-                    : default;
+                        ? GetPropertyName(ref reader, ref rentedBuffer)
+                        : default;
 
                 directive = state.Advance(reader.TokenType, pattern, name);
             }

@@ -229,4 +229,17 @@ internal static class JsonPathNavigator
             result = result.Property(System.Text.Encoding.UTF8.GetBytes(segment));
         return result;
     }
+
+    internal static JsonPath ToLegacyPath(NdJsonPath path)
+    {
+        var result = JsonPath.Root;
+        foreach (var seg in path.Segments)
+        {
+            if (seg.Length == 0)
+                result = result.Each();
+            else
+                result = result.Property(seg);
+        }
+        return result;
+    }
 }

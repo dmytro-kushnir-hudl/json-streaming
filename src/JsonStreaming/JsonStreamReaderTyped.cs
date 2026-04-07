@@ -24,7 +24,7 @@ public static class JsonStreamReaderTyped
     /// </summary>
     public static Task<int> ProcessArrayAsync<T>(
         PipeReader pipeReader,
-        JsonPath path,
+        NdJsonPath path,
         JsonTypeInfo<T> typeInfo,
         Action<T> processItem,
         CancellationToken ct = default
@@ -54,7 +54,7 @@ public static class JsonStreamReaderTyped
     ) =>
         ProcessArrayAsync(
             pipeReader,
-            JsonPathNavigator.ParseDotPath(path),
+            NdJsonPath.Parse("$." + path),
             typeInfo,
             processItem,
             ct
@@ -72,7 +72,7 @@ public static class JsonStreamReaderTyped
     /// </summary>
     public static Task<int> WriteArrayAsync<TIn, TOut>(
         PipeReader pipeReader,
-        JsonPath path,
+        NdJsonPath path,
         Utf8JsonWriter writer,
         JsonTypeInfo<TIn> inputType,
         JsonTypeInfo<TOut> outputType,
@@ -86,7 +86,7 @@ public static class JsonStreamReaderTyped
     /// </summary>
     public static Task<int> WriteArrayAsync<TIn, TOut>(
         PipeReader pipeReader,
-        JsonPath path,
+        NdJsonPath path,
         Utf8JsonWriter writer,
         JsonTypeInfo<TIn> inputType,
         JsonTypeInfo<TOut> outputType,
@@ -125,7 +125,7 @@ public static class JsonStreamReaderTyped
         Func<TIn, TOut?> transform,
         CancellationToken ct = default
     ) =>
-        WriteArrayAsync(pipeReader, JsonPathNavigator.ParseDotPath(path), writer, inputType, outputType, transform, ct);
+        WriteArrayAsync(pipeReader, NdJsonPath.Parse("$." + path), writer, inputType, outputType, transform, ct);
 
     /// <summary>
     /// Convenience overload: dot-separated path + explicit options.
@@ -140,7 +140,7 @@ public static class JsonStreamReaderTyped
         WriteOptions options,
         CancellationToken ct = default
     ) =>
-        WriteArrayAsync(pipeReader, JsonPathNavigator.ParseDotPath(path), writer, inputType, outputType, transform, options, ct);
+        WriteArrayAsync(pipeReader, NdJsonPath.Parse("$." + path), writer, inputType, outputType, transform, options, ct);
 
     // ── Typed direct-write (TIn → write directly, no TOut allocation) ──────
 
@@ -153,7 +153,7 @@ public static class JsonStreamReaderTyped
     /// </summary>
     public static Task<int> WriteArrayAsync<T>(
         PipeReader pipeReader,
-        JsonPath path,
+        NdJsonPath path,
         Utf8JsonWriter writer,
         JsonTypeInfo<T> inputType,
         Action<T, Utf8JsonWriter> writeItem,
@@ -166,7 +166,7 @@ public static class JsonStreamReaderTyped
     /// </summary>
     public static Task<int> WriteArrayAsync<T>(
         PipeReader pipeReader,
-        JsonPath path,
+        NdJsonPath path,
         Utf8JsonWriter writer,
         JsonTypeInfo<T> inputType,
         Action<T, Utf8JsonWriter> writeItem,
@@ -199,7 +199,7 @@ public static class JsonStreamReaderTyped
         Action<T, Utf8JsonWriter> writeItem,
         CancellationToken ct = default
     ) =>
-        WriteArrayAsync(pipeReader, JsonPathNavigator.ParseDotPath(path), writer, inputType, writeItem, ct);
+        WriteArrayAsync(pipeReader, NdJsonPath.Parse("$." + path), writer, inputType, writeItem, ct);
 
     /// <summary>
     /// Convenience overload: dot-separated path + explicit options.
@@ -213,7 +213,7 @@ public static class JsonStreamReaderTyped
         WriteOptions options,
         CancellationToken ct = default
     ) =>
-        WriteArrayAsync(pipeReader, JsonPathNavigator.ParseDotPath(path), writer, inputType, writeItem, options, ct);
+        WriteArrayAsync(pipeReader, NdJsonPath.Parse("$." + path), writer, inputType, writeItem, options, ct);
 
     // ── Typed verbatim (passthrough raw bytes, no deserialize) ─────────────
 
@@ -227,7 +227,7 @@ public static class JsonStreamReaderTyped
     /// </summary>
     public static Task<int> WriteArrayAsync<T>(
         PipeReader pipeReader,
-        JsonPath path,
+        NdJsonPath path,
         Utf8JsonWriter writer,
         JsonTypeInfo<T> typeInfo,
         CancellationToken ct = default
@@ -245,5 +245,5 @@ public static class JsonStreamReaderTyped
         JsonTypeInfo<T> typeInfo,
         CancellationToken ct = default
     ) =>
-        WriteArrayAsync(pipeReader, JsonPathNavigator.ParseDotPath(path), writer, typeInfo, ct);
+        WriteArrayAsync(pipeReader, NdJsonPath.Parse("$." + path), writer, typeInfo, ct);
 }

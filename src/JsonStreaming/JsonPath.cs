@@ -5,7 +5,7 @@ namespace JsonStreaming;
 /// <summary>
 /// Describes how a segment navigates the JSON tree.
 /// </summary>
-public enum SegmentKind : byte
+internal enum SegmentKind : byte
 {
     /// <summary>Match a property name and descend into its value.</summary>
     Property,
@@ -20,7 +20,7 @@ public enum SegmentKind : byte
 /// <summary>
 /// A single navigation step in a <see cref="JsonPath"/>.
 /// </summary>
-public readonly struct Segment
+internal readonly struct Segment
 {
     /// <inheritdoc cref="SegmentKind"/>
     public SegmentKind Kind { get; }
@@ -47,7 +47,7 @@ public readonly struct Segment
 /// // Equivalent JSONPath: $.response[*].messages
 /// </code>
 /// </summary>
-public sealed class JsonPath
+internal sealed class JsonPath
 {
     /// <summary>Empty path — targets the root array.</summary>
     public static JsonPath Root { get; } = new([]);

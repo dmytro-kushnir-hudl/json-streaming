@@ -138,7 +138,7 @@ public class JsonStreamReaderTests
     public async Task ProcessArray_JsonPath_NavigatesCorrectly()
     {
         var pipe = ToPipe("""{"response":{"data":{"items":[1,2,3]}}}""");
-        var path = JsonPath.Root.Property("response"u8).Property("data"u8).Property("items"u8);
+        var path = NdJsonPath.At("response").Key("data").Key("items");
         var count = await JsonStreamReader.ProcessArrayAsync(pipe, path, _ => { });
         count.Should().Be(3);
     }
@@ -147,7 +147,7 @@ public class JsonStreamReaderTests
     public async Task ProcessArray_JsonPathRoot_ReadsRootArray()
     {
         var pipe = ToPipe("""["a","b","c"]""");
-        var count = await JsonStreamReader.ProcessArrayAsync(pipe, JsonPath.Root, _ => { });
+        var count = await JsonStreamReader.ProcessArrayAsync(pipe, NdJsonPath.Root, _ => { });
         count.Should().Be(3);
     }
 
@@ -277,7 +277,7 @@ public class JsonStreamReaderTests
     {
         var json = """{"responses":[{"messages":[{"id":1},{"id":2}]},{"messages":[{"id":3}]}]}""";
         var pipe = ToPipe(json);
-        var path = JsonPath.Root.Property("responses"u8).Each().Property("messages"u8);
+        var path = NdJsonPath.At("responses").Each().Key("messages");
 
         var ids = new List<int>();
         await JsonStreamReader.ProcessArrayAsync(
@@ -296,7 +296,7 @@ public class JsonStreamReaderTests
     public async Task Each_NoSuffix_YieldsOuterElements()
     {
         var pipe = ToPipe("""{"items":[{"a":1},{"a":2},{"a":3}]}""");
-        var path = JsonPath.Root.Property("items"u8).Each();
+        var path = NdJsonPath.At("items").Each();
 
         var values = new List<int>();
         await JsonStreamReader.ProcessArrayAsync(
@@ -315,7 +315,7 @@ public class JsonStreamReaderTests
     public async Task Each_EmptyInnerArrays_ReturnsZero()
     {
         var pipe = ToPipe("""{"items":[{"msgs":[]},{"msgs":[]}]}""");
-        var path = JsonPath.Root.Property("items"u8).Each().Property("msgs"u8);
+        var path = NdJsonPath.At("items").Each().Key("msgs");
         var count = await JsonStreamReader.ProcessArrayAsync(pipe, path, _ => { });
         count.Should().Be(0);
     }
@@ -325,7 +325,7 @@ public class JsonStreamReaderTests
     {
         var json = """{"groups":[{"items":[]},{"items":[1,2]},{"items":[]},{"items":[3]}]}""";
         var pipe = ToPipe(json);
-        var path = JsonPath.Root.Property("groups"u8).Each().Property("items"u8);
+        var path = NdJsonPath.At("groups").Each().Key("items");
 
         var values = new List<int>();
         await JsonStreamReader.ProcessArrayAsync(
@@ -345,7 +345,7 @@ public class JsonStreamReaderTests
     {
         var json = """{"items":[{"data":[1]},{"other":"x"},{"data":[2,3]}]}""";
         var pipe = ToPipe(json);
-        var path = JsonPath.Root.Property("items"u8).Each().Property("data"u8);
+        var path = NdJsonPath.At("items").Each().Key("data");
 
         var values = new List<int>();
         await JsonStreamReader.ProcessArrayAsync(
@@ -366,7 +366,7 @@ public class JsonStreamReaderTests
         var json =
             """{"items":[{"meta":"x","data":[10],"footer":"y"},{"data":[20,30],"extra":{"nested":true}}]}""";
         var pipe = ToPipe(json);
-        var path = JsonPath.Root.Property("items"u8).Each().Property("data"u8);
+        var path = NdJsonPath.At("items").Each().Key("data");
 
         var values = new List<int>();
         await JsonStreamReader.ProcessArrayAsync(
@@ -385,7 +385,7 @@ public class JsonStreamReaderTests
     public async Task Each_ParsedJsonPath()
     {
         var pipe = ToPipe("""{"groups":[{"items":[1]},{"items":[2,3]}]}""");
-        var path = JsonPath.Parse("$.groups[*].items");
+        var path = NdJsonPath.Parse("$.groups[*].items");
 
         var values = new List<int>();
         await JsonStreamReader.ProcessArrayAsync(
@@ -409,7 +409,7 @@ public class JsonStreamReaderTests
         var json =
             """{"data":[{"items":[{"v":1},{"v":2}]},{"items":[{"v":3}]},{"items":[{"v":4},{"v":5},{"v":6}]}]}""";
         var pipe = ToPipe(json, bufferSize);
-        var path = JsonPath.Root.Property("data"u8).Each().Property("items"u8);
+        var path = NdJsonPath.At("data").Each().Key("items");
 
         var values = new List<int>();
         await JsonStreamReader.ProcessArrayAsync(
@@ -428,7 +428,7 @@ public class JsonStreamReaderTests
     public async Task Each_EmptyOuterArray_ReturnsZero()
     {
         var pipe = ToPipe("""{"items":[]}""");
-        var path = JsonPath.Root.Property("items"u8).Each().Property("data"u8);
+        var path = NdJsonPath.At("items").Each().Key("data");
         var count = await JsonStreamReader.ProcessArrayAsync(pipe, path, _ => { });
         count.Should().Be(0);
     }
@@ -439,12 +439,11 @@ public class JsonStreamReaderTests
         var json =
             """{"pages":[{"response":{"data":{"items":[1,2]}}},{"response":{"data":{"items":[3]}}}]}""";
         var pipe = ToPipe(json);
-        var path = JsonPath.Root
-            .Property("pages"u8)
+        var path = NdJsonPath.At("pages")
             .Each()
-            .Property("response"u8)
-            .Property("data"u8)
-            .Property("items"u8);
+            .Key("response")
+            .Key("data")
+            .Key("items");
 
         var values = new List<int>();
         await JsonStreamReader.ProcessArrayAsync(
@@ -519,7 +518,7 @@ public class JsonStreamReaderTests
     {
         var json = """{"pages":[{"items":[1,2]},{"items":[3]}]}""";
         var pipe = ToPipe(json);
-        var path = JsonPath.Root.Property("pages"u8).Each().Property("items"u8);
+        var path = NdJsonPath.At("pages").Each().Key("items");
 
         var output = new ArrayBufferWriter<byte>();
         await using var writer = new Utf8JsonWriter(output);
@@ -634,7 +633,7 @@ public class JsonStreamReaderTests
         );
         var json = $$$"""{"data":[{{{groups}}}]}""";
         var pipe = ToPipe(json);
-        var path = JsonPath.Root.Property("data"u8).Each().Property("items"u8);
+        var path = NdJsonPath.At("data").Each().Key("items");
 
         var flushCounter = new FlushCountingBufferWriter();
         await using var writer = new Utf8JsonWriter(flushCounter);
@@ -701,7 +700,7 @@ public class JsonStreamReaderTests
         var json =
             $$"""{"data":[{"items":[{{makeItems(1, 5)}}]},{"items":[{{makeItems(6, 5)}}]},{"items":[{{makeItems(11, 5)}}]}]}""";
         var pipe = ToPipe(json);
-        var path = JsonPath.Root.Property("data"u8).Each().Property("items"u8);
+        var path = NdJsonPath.At("data").Each().Key("items");
 
         var output = new ArrayBufferWriter<byte>();
         await using var writer = new Utf8JsonWriter(output);

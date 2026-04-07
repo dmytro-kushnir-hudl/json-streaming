@@ -30,7 +30,7 @@ app.MapGet(
 
         await JsonStreamPipeline.PassthroughArrayAsync(
             upstream.Pipe,
-            JsonPath.Root,
+            NdJsonPath.Root,
             ctx.Response.BodyWriter,
             "comments",
             ct
@@ -87,7 +87,7 @@ app.MapGet(
 
         await JsonStreamPipeline.TransformArrayAsync(
             upstream.Pipe,
-            JsonPath.Root,
+            NdJsonPath.Root,
             ctx.Response.BodyWriter,
             "photos",
             SampleJsonContext.Default.Photo,
@@ -202,7 +202,7 @@ app.MapGet(
 
         var count = await JsonStreamReader.WriteArrayAsync(
             upstream.Pipe,
-            JsonPath.Root,
+            NdJsonPath.Root,
             writer,
             (itemBytes, w) =>
             {
@@ -404,7 +404,7 @@ app.MapGet(
         {
             await JsonStreamReader.ProcessArrayAsync(
                 upstream.Pipe,
-                JsonPath.Root,
+                NdJsonPath.Root,
                 itemBytes =>
                 {
                     // Re-serialize compact — upstream may be pretty-printed
@@ -466,7 +466,7 @@ app.MapGet(
 );
 
 // ════════════════════════════════════════════════════════════════════════
-// DEEP MATCHING — JsonPath with Each() for select-many across nested arrays.
+// DEEP MATCHING — NdJsonPath with Each() for select-many across nested arrays.
 //
 // Upstream shape: {"pages": [{"todos": [...]}, {"todos": [...]}, ...]}
 // Each() flattens: iterate each page, yield all todos across all pages.
@@ -504,11 +504,7 @@ app.MapGet(
         );
 
         // Deep path: navigate data → pages → [*] → todos
-        var path = JsonPath.Root
-            .Property("data"u8)
-            .Property("pages"u8)
-            .Each()
-            .Property("todos"u8);
+        var path = NdJsonPath.At("data").Key("pages").Each().Key("todos");
 
         await JsonStreamPipeline.PassthroughArrayAsync(
             pipe,
@@ -534,9 +530,9 @@ app.MapGet(
         );
 
         // DummyJSON wraps products in {"products": [...], "total": ...}
-        // Navigate with JsonPath: $.products
-        // For deeper nesting, use: JsonPath.Root.Property("a"u8).Property("b"u8).Property("c"u8)
-        var path = JsonPath.Root.Property("products"u8);
+        // Navigate with NdJsonPath: $.products
+        // For deeper nesting, use: NdJsonPath.At("a").Key("b").Key("c")
+        var path = NdJsonPath.At("products");
 
         await JsonStreamPipeline.TransformArrayAsync(
             upstream.Pipe,
@@ -563,7 +559,7 @@ app.MapGet(
     }
 );
 
-// JSONPath.Parse — same deep navigation from a string.
+// NdJsonPath.Parse — same deep navigation from a string.
 // Use when: the path comes from configuration or user input.
 app.MapGet(
     "/deep/jsonpath",
@@ -574,8 +570,8 @@ app.MapGet(
             "https://dummyjson.com/products?limit=5"
         );
 
-        // Parse from JSONPath string — equivalent to JsonPath.Root.Property("products"u8)
-        var path = JsonPath.Parse("$.products");
+        // Parse from NdJsonPath string — equivalent to NdJsonPath.At("products")
+        var path = NdJsonPath.Parse("$.products");
 
         await JsonStreamPipeline.PassthroughArrayAsync(
             upstream.Pipe,

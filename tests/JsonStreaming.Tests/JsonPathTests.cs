@@ -1,3 +1,4 @@
+using System.Text;
 using FluentAssertions;
 using JsonStreaming;
 
@@ -8,133 +9,122 @@ public class JsonPathTests
     [Fact]
     public void Root_HasNoSegments()
     {
-        JsonPath.Root.Segments.Length.Should().Be(0);
+        NdJsonPath.Root.Segments.Length.Should().Be(0);
     }
 
     [Fact]
-    public void Property_AddsSegment()
+    public void At_CreatesPropertySegment()
     {
-        var path = JsonPath.Root.Property("messages"u8);
-
+        NdJsonPath path = NdJsonPath.At("messages");
         path.Segments.Length.Should().Be(1);
-        path.Segments[0].Kind.Should().Be(SegmentKind.Property);
+        path.Segments[0].Should().BeEquivalentTo(Encoding.UTF8.GetBytes("messages"));
     }
 
     [Fact]
-    public void Array_AddsEnterArraySegment()
+    public void Each_CreatesWildcardSegment()
     {
-        var path = JsonPath.Root.Array("items"u8);
-
+        NdJsonPath path = NdJsonPath.Each();
         path.Segments.Length.Should().Be(1);
-        path.Segments[0].Kind.Should().Be(SegmentKind.EnterArray);
-    }
-
-    [Fact]
-    public void Each_AddsEachSegment()
-    {
-        var path = JsonPath.Root.Each();
-
-        path.Segments.Length.Should().Be(1);
-        path.Segments[0].Kind.Should().Be(SegmentKind.Each);
+        path.Segments[0].Length.Should().Be(0);
     }
 
     [Fact]
     public void Chained_BuildsCorrectPath()
     {
-        var path = JsonPath.Root.Property("response"u8).Each().Property("messages"u8);
-
+        NdJsonPath path = NdJsonPath.At("response").Each().Key("messages");
         path.Segments.Length.Should().Be(3);
-        path.Segments[0].Kind.Should().Be(SegmentKind.Property);
-        path.Segments[1].Kind.Should().Be(SegmentKind.Each);
-        path.Segments[2].Kind.Should().Be(SegmentKind.Property);
+        path.Segments[0].Should().BeEquivalentTo(Encoding.UTF8.GetBytes("response"));
+        path.Segments[1].Length.Should().Be(0);
+        path.Segments[2].Should().BeEquivalentTo(Encoding.UTF8.GetBytes("messages"));
+    }
+
+    [Fact]
+    public void Property_Utf8_Works()
+    {
+        NdJsonPath path = NdJsonPath.Each().Property("name"u8);
+        path.Segments.Length.Should().Be(2);
+        path.Segments[1].Should().BeEquivalentTo("name"u8.ToArray());
     }
 
     [Fact]
     public void ToJsonPath_Root_ReturnsDollar()
     {
-        JsonPath.Root.ToJsonPath().Should().Be("$");
+        NdJsonPath.Root.ToJsonPath().Should().Be("$");
     }
 
     [Fact]
     public void ToJsonPath_SingleProperty()
     {
-        var path = JsonPath.Root.Property("messages"u8);
+        NdJsonPath path = NdJsonPath.At("messages");
         path.ToJsonPath().Should().Be("$.messages");
     }
 
     [Fact]
     public void ToJsonPath_NestedWithEach()
     {
-        var path = JsonPath.Root.Property("response"u8).Each().Property("messages"u8);
+        NdJsonPath path = NdJsonPath.At("response").Each().Key("messages");
         path.ToJsonPath().Should().Be("$.response[*].messages");
     }
 
     [Fact]
     public void Parse_Empty_ReturnsRoot()
     {
-        var path = JsonPath.Parse("");
-        path.Segments.Length.Should().Be(0);
+        NdJsonPath.Parse("").Segments.Length.Should().Be(0);
     }
 
     [Fact]
     public void Parse_DollarOnly_ReturnsRoot()
     {
-        var path = JsonPath.Parse("$");
-        path.Segments.Length.Should().Be(0);
+        NdJsonPath.Parse("$").Segments.Length.Should().Be(0);
     }
 
     [Fact]
     public void Parse_SimpleProperty()
     {
-        var path = JsonPath.Parse("$.messages");
-
+        var path = NdJsonPath.Parse("$.messages");
         path.Segments.Length.Should().Be(1);
-        path.Segments[0].Kind.Should().Be(SegmentKind.Property);
+        path.Segments[0].Should().BeEquivalentTo(Encoding.UTF8.GetBytes("messages"));
     }
 
     [Fact]
     public void Parse_NestedPath()
     {
-        var path = JsonPath.Parse("$.response.data.items");
-
-        path.Segments.Length.Should().Be(3);
+        NdJsonPath.Parse("$.response.data.items").Segments.Length.Should().Be(3);
     }
 
     [Fact]
     public void Parse_WithWildcard()
     {
-        var path = JsonPath.Parse("$.response[*].messages");
-
+        var path = NdJsonPath.Parse("$.response[*].messages");
         path.Segments.Length.Should().Be(3);
-        path.Segments[0].Kind.Should().Be(SegmentKind.Property);
-        path.Segments[1].Kind.Should().Be(SegmentKind.Each);
-        path.Segments[2].Kind.Should().Be(SegmentKind.Property);
+        path.Segments[0].Should().BeEquivalentTo(Encoding.UTF8.GetBytes("response"));
+        path.Segments[1].Length.Should().Be(0);
+        path.Segments[2].Should().BeEquivalentTo(Encoding.UTF8.GetBytes("messages"));
     }
 
     [Fact]
     public void Roundtrip_BuilderToJsonPathAndBack()
     {
-        var original = JsonPath.Root.Property("response"u8).Each().Property("items"u8);
+        NdJsonPath original = NdJsonPath.At("response").Each().Key("items");
         var jsonPathStr = original.ToJsonPath();
-        var parsed = JsonPath.Parse(jsonPathStr);
-
+        var parsed = NdJsonPath.Parse(jsonPathStr);
         parsed.ToJsonPath().Should().Be(jsonPathStr);
     }
 
     [Fact]
     public void ToString_MatchesToJsonPath()
     {
-        var path = JsonPath.Root.Property("data"u8);
+        NdJsonPath path = NdJsonPath.At("data");
         path.ToString().Should().Be(path.ToJsonPath());
     }
 
     [Fact]
-    public void Immutable_OriginalUnchanged()
+    public void Separate_Builders_AreIndependent()
     {
-        var root = JsonPath.Root;
-        var withProp = root.Property("x"u8);
+        NdJsonPath pathA = NdJsonPath.At("x");
+        NdJsonPath pathB = NdJsonPath.At("x").Key("y");
 
-        root.Segments.Length.Should().Be(0);
-        withProp.Segments.Length.Should().Be(1);
+        pathA.Segments.Length.Should().Be(1);
+        pathB.Segments.Length.Should().Be(2);
     }
 }

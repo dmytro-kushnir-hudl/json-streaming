@@ -36,11 +36,11 @@ public static class JsonStreamReader
     /// </summary>
     public static Task<int> ProcessArrayAsync(
         PipeReader pipeReader,
-        JsonPath path,
+        NdJsonPath path,
         Action<ReadOnlySequence<byte>> processItem,
         CancellationToken ct = default
     ) =>
-        JsonPathNavigator.HasEach(path)
+        HasEach(path)
             ? ProcessSelectManyAsync(pipeReader, path, processItem, ct)
             : ProcessSimpleAsync(pipeReader, path, processItem, ct);
 
@@ -52,7 +52,7 @@ public static class JsonStreamReader
         string path,
         Action<ReadOnlySequence<byte>> processItem,
         CancellationToken ct = default
-    ) => ProcessSimpleAsync(pipeReader, JsonPathNavigator.ParseDotPath(path), processItem, ct);
+    ) => ProcessSimpleAsync(pipeReader, ParseDotPath(path), processItem, ct);
 
     // ── Write-through API (PipeReader → Utf8JsonWriter) ────────────────────
 
@@ -67,7 +67,7 @@ public static class JsonStreamReader
     /// </summary>
     public static Task<int> WriteArrayAsync(
         PipeReader pipeReader,
-        JsonPath path,
+        NdJsonPath path,
         Utf8JsonWriter writer,
         CancellationToken ct = default
     ) => WriteArrayAsync(pipeReader, path, writer, WriteOptions.Default, ct);
@@ -77,7 +77,7 @@ public static class JsonStreamReader
     /// </summary>
     public static Task<int> WriteArrayAsync(
         PipeReader pipeReader,
-        JsonPath path,
+        NdJsonPath path,
         Utf8JsonWriter writer,
         WriteOptions options,
         CancellationToken ct = default
@@ -105,7 +105,7 @@ public static class JsonStreamReader
         string path,
         Utf8JsonWriter writer,
         CancellationToken ct = default
-    ) => WriteArrayAsync(pipeReader, JsonPathNavigator.ParseDotPath(path), writer, ct);
+    ) => WriteArrayAsync(pipeReader, ParseDotPath(path), writer, ct);
 
     /// <summary>
     /// Convenience overload accepting a dot-separated path string with explicit options.
@@ -116,7 +116,7 @@ public static class JsonStreamReader
         Utf8JsonWriter writer,
         WriteOptions options,
         CancellationToken ct = default
-    ) => WriteArrayAsync(pipeReader, JsonPathNavigator.ParseDotPath(path), writer, options, ct);
+    ) => WriteArrayAsync(pipeReader, ParseDotPath(path), writer, options, ct);
 
     /// <summary>
     /// Navigates to the target array(s) and invokes <paramref name="writeItem"/>
@@ -127,7 +127,7 @@ public static class JsonStreamReader
     /// </summary>
     public static Task<int> WriteArrayAsync(
         PipeReader pipeReader,
-        JsonPath path,
+        NdJsonPath path,
         Utf8JsonWriter writer,
         WriteItemDelegate writeItem,
         CancellationToken ct = default
@@ -138,7 +138,7 @@ public static class JsonStreamReader
     /// </summary>
     public static Task<int> WriteArrayAsync(
         PipeReader pipeReader,
-        JsonPath path,
+        NdJsonPath path,
         Utf8JsonWriter writer,
         WriteItemDelegate writeItem,
         WriteOptions options,
@@ -154,7 +154,7 @@ public static class JsonStreamReader
         Utf8JsonWriter writer,
         WriteItemDelegate writeItem,
         CancellationToken ct = default
-    ) => WriteArrayAsync(pipeReader, JsonPathNavigator.ParseDotPath(path), writer, writeItem, ct);
+    ) => WriteArrayAsync(pipeReader, ParseDotPath(path), writer, writeItem, ct);
 
     /// <summary>
     /// Convenience overload: dot-separated path string + transform + explicit options.
@@ -169,7 +169,7 @@ public static class JsonStreamReader
     ) =>
         WriteArrayAsync(
             pipeReader,
-            JsonPathNavigator.ParseDotPath(path),
+            ParseDotPath(path),
             writer,
             writeItem,
             options,
@@ -180,7 +180,7 @@ public static class JsonStreamReader
 
     private static async Task<int> WriteArrayCoreAsync(
         PipeReader pipeReader,
-        JsonPath path,
+        NdJsonPath path,
         Utf8JsonWriter writer,
         WriteItemDelegate writeItem,
         WriteOptions options,
@@ -190,9 +190,11 @@ public static class JsonStreamReader
         var flushThreshold = (long)(options.FlushThreshold * WriteOptions.FlushRatio);
         var asyncFlush = options.AsyncFlush;
 
-        if (JsonPathNavigator.HasEach(path))
+        var legacyPath = ToLegacyPath(path);
+
+        if (HasEach(path))
         {
-            var (prefix, suffix) = JsonPathNavigator.SplitAtEach(path);
+            var (prefix, suffix) = JsonPathNavigator.SplitAtEach(legacyPath);
             var suffixNames = JsonPathNavigator.ExtractPropertyNames(suffix);
 
             var outerState = await JsonPathNavigator.NavigateToArrayAsync(pipeReader, prefix, ct);
@@ -225,7 +227,7 @@ public static class JsonStreamReader
         }
         else
         {
-            var navState = await JsonPathNavigator.NavigateToArrayAsync(pipeReader, path, ct);
+            var navState = await JsonPathNavigator.NavigateToArrayAsync(pipeReader, legacyPath, ct);
             if (navState is null)
                 return 0;
 
@@ -597,12 +599,13 @@ public static class JsonStreamReader
 
     private static async Task<int> ProcessSimpleAsync(
         PipeReader pipeReader,
-        JsonPath path,
+        NdJsonPath path,
         Action<ReadOnlySequence<byte>> processItem,
         CancellationToken ct
     )
     {
-        var navState = await JsonPathNavigator.NavigateToArrayAsync(pipeReader, path, ct);
+        var legacyPath = ToLegacyPath(path);
+        var navState = await JsonPathNavigator.NavigateToArrayAsync(pipeReader, legacyPath, ct);
         if (navState is null)
             return 0;
 
@@ -611,12 +614,13 @@ public static class JsonStreamReader
 
     private static async Task<int> ProcessSelectManyAsync(
         PipeReader pipeReader,
-        JsonPath path,
+        NdJsonPath path,
         Action<ReadOnlySequence<byte>> processItem,
         CancellationToken ct
     )
     {
-        var (prefix, suffix) = JsonPathNavigator.SplitAtEach(path);
+        var legacyPath = ToLegacyPath(path);
+        var (prefix, suffix) = JsonPathNavigator.SplitAtEach(legacyPath);
         var suffixNames = JsonPathNavigator.ExtractPropertyNames(suffix);
 
         var outerState = await JsonPathNavigator.NavigateToArrayAsync(pipeReader, prefix, ct);
@@ -899,7 +903,32 @@ public static class JsonStreamReader
         return count;
     }
 
-    // Dead code removed: MaybeFlushAsync was unused — flush is inline in iteration loops.
+    // ── Internal helpers ─────────────────────────────────────────────────
+
+    private static NdJsonPath ParseDotPath(string path)
+    {
+        if (string.IsNullOrEmpty(path))
+            return NdJsonPath.Root;
+
+        var builder = new NdJsonPath.Builder();
+        foreach (var segment in path.Split('.'))
+            builder.Key(segment);
+        return builder;
+    }
+
+    private static bool HasEach(NdJsonPath path) =>
+        Array.Exists(path.Segments, s => s.Length == 0);
+
+    private static (byte[][] Prefix, byte[][] Suffix) SplitAtEach(NdJsonPath path)
+    {
+        int eachIndex = Array.FindIndex(path.Segments, s => s.Length == 0);
+        if (eachIndex < 0)
+            return (path.Segments, []);
+        return (path.Segments[..eachIndex], path.Segments[(eachIndex + 1)..]);
+    }
+
+    private static JsonPath ToLegacyPath(NdJsonPath path) =>
+        JsonPathNavigator.ToLegacyPath(path);
 }
 
 /// <summary>

@@ -59,7 +59,7 @@ public class TypedApiTests
     {
         var json = """{"data":{"items":[{"id":1,"name":"x","score":1.0}]}}""";
         var pipe = ToPipe(json);
-        var path = JsonPath.Root.Property("data"u8).Property("items"u8);
+        var path = NdJsonPath.At("data").Key("items");
 
         var ids = new List<int>();
         await JsonStreamReaderTyped.ProcessArrayAsync(
@@ -166,7 +166,7 @@ public class TypedApiTests
     {
         var json = """{"groups":[{"items":[{"id":1,"name":"a","score":1.0}]},{"items":[{"id":2,"name":"b","score":2.0}]}]}""";
         var pipe = ToPipe(json);
-        var path = JsonPath.Root.Property("groups"u8).Each().Property("items"u8);
+        var path = NdJsonPath.At("groups").Each().Key("items");
 
         var output = new ArrayBufferWriter<byte>();
         using var writer = new Utf8JsonWriter(output);

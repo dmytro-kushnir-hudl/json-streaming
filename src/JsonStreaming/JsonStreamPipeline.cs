@@ -35,7 +35,7 @@ public static class JsonStreamPipeline
     ) =>
         TransformArrayAsync(
             input,
-            JsonPathNavigator.ParseDotPath(sourcePath),
+            NdJsonPath.Parse("$." + sourcePath),
             output,
             outputArrayName,
             inputType,
@@ -49,7 +49,7 @@ public static class JsonStreamPipeline
     /// </summary>
     public static async Task<int> TransformArrayAsync<TIn, TOut>(
         PipeReader input,
-        JsonPath sourcePath,
+        NdJsonPath sourcePath,
         PipeWriter output,
         string outputArrayName,
         JsonTypeInfo<TIn> inputType,
@@ -190,7 +190,7 @@ public static class JsonStreamPipeline
     /// </summary>
     public static async Task<int> PassthroughArrayAsync(
         PipeReader input,
-        JsonPath sourcePath,
+        NdJsonPath sourcePath,
         PipeWriter output,
         string outputArrayName,
         CancellationToken ct = default
