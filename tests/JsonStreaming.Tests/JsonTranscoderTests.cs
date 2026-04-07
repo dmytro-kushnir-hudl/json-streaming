@@ -74,4 +74,57 @@ public class JsonTranscoderTests
 
         actual.Should().Equal(expected);
     }
+
+    // ── Composability: formatted projection vs formatted proxy ──────────────
+
+    // language=JSON
+    private const string PeopleJson = """
+        [
+          { "name": "Adeel Solangi",  "language": "Sindhi", "version": 6.1  },
+          { "name": "Afzal Ghaffar",  "language": "Sindhi", "version": 1.88 },
+          { "name": "Aamir Solangi",  "language": "Sindhi", "version": 7.27 }
+        ]
+        """;
+
+    /// <summary>
+    /// Projects each array element, then formats each individually via
+    /// JsonSerializer (reference implementation). Establishes expected output
+    /// for a future FormattedRenderer: when it exists, formatted projection
+    /// output should match these reference-formatted elements exactly.
+    /// </summary>
+    [Fact]
+    public async Task FormattedProjection_EachElement_RoundTrips()
+    {
+        // Step 1: Project all elements via minified renderer
+        var projected = await ProjectAsync(PeopleJson, NdJsonPath.Each(), bufferSize: 64, direct: false);
+        projected.Should().HaveCount(3);
+
+        // Step 2: Each projected element is valid JSON that round-trips
+        var formatted = new string[projected.Length];
+        for (int i = 0; i < projected.Length; i++)
+        {
+            var doc = System.Text.Json.JsonDocument.Parse(projected[i]);
+            formatted[i] = System.Text.Json.JsonSerializer.Serialize(
+                doc.RootElement,
+                new System.Text.Json.JsonSerializerOptions { WriteIndented = true }
+            );
+
+            // Round-trip: formatted → minified should equal original projection
+            var roundTripped = System.Text.Json.JsonSerializer.Serialize(
+                System.Text.Json.JsonDocument.Parse(formatted[i]).RootElement
+            );
+            roundTripped.Should().Be(projected[i], $"element {i} should round-trip");
+        }
+
+        // Step 3: Verbatim renderer produces same number of elements
+        // Note: verbatim output uses raw buffer copy which may differ in whitespace
+        // from minified output, but element count should match
+        var verbatim = await ProjectAsync(PeopleJson, NdJsonPath.Each(), bufferSize: 64, direct: true);
+        verbatim.Should().HaveCount(projected.Length,
+            "verbatim and minified renderers should find the same number of elements");
+
+        // TODO: When FormattedRenderer exists, compare directly:
+        // var formattedProjected = await ProjectFormattedAsync(PeopleJson, NdJsonPath.Each(), 64);
+        // formattedProjected.Should().Equal(formatted);
+    }
 }

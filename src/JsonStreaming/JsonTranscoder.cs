@@ -126,7 +126,11 @@ public static class JsonTranscoder
     {
         var jwriter = new Utf8JsonWriter(writer, writerOptions);
         var state = new ProjectionState { ReaderState = new JsonReaderState(readerOptions) };
+        var renderer = new MinifiedRenderer(jwriter);
+        var framer = new NdJsonFramer();
         ct.ThrowIfCancellationRequested();
+
+        framer.BeginDocument(writer);
 
         while (true)
         {
@@ -139,7 +143,7 @@ public static class JsonTranscoder
                 if (result.IsCanceled)
                     throw new OperationCanceledException(ct);
 
-                var bytesConsumed = WriteProjection(state, result, jwriter, writer, path.Segments);
+                var bytesConsumed = WriteProjection(state, result, writer, path.Segments, ref renderer, ref framer);
                 consumed = buffer.GetPosition(bytesConsumed);
 
                 if (
@@ -159,6 +163,8 @@ public static class JsonTranscoder
                 reader.AdvanceTo(consumed, buffer.End);
             }
         }
+
+        framer.EndDocument(writer);
     }
 
     /// <summary>
@@ -176,7 +182,11 @@ public static class JsonTranscoder
     )
     {
         var state = new ProjectionState { ReaderState = new JsonReaderState(options) };
+        var renderer = new VerbatimRenderer();
+        var framer = new NdJsonFramer();
         ct.ThrowIfCancellationRequested();
+
+        framer.BeginDocument(writer);
 
         while (true)
         {
@@ -189,7 +199,7 @@ public static class JsonTranscoder
                 if (result.IsCanceled)
                     throw new OperationCanceledException(ct);
 
-                var bytesConsumed = WriteProjectionDirect(state, result, writer, path.Segments);
+                var bytesConsumed = WriteProjection(state, result, writer, path.Segments, ref renderer, ref framer);
                 consumed = buffer.GetPosition(bytesConsumed);
 
                 if (result.IsCompleted || writer is { CanGetUnflushedBytes: true, UnflushedBytes: >= FlushThreshold })
@@ -205,6 +215,8 @@ public static class JsonTranscoder
                 reader.AdvanceTo(consumed, buffer.End);
             }
         }
+
+        framer.EndDocument(writer);
     }
 
     // ── WriteFormatted ────────────────────────────────────────────────────────
@@ -280,6 +292,22 @@ public static class JsonTranscoder
             for (int i = 0; i < depth; i++)
                 pw.Write("  "u8);
         }
+        
+        static void WriteIndent_2(PipeWriter pw, int depth)
+        {
+            int totalBytes = depth * 2;
+            while (totalBytes > 0)
+            {
+                // Ask for what's left, but the Pipe might give us a smaller 
+                // default segment size (e.g., 4096)
+                var span = pw.GetSpan(1); 
+                int writable = Math.Min(totalBytes, span.Length);
+        
+                span.Slice(0, writable).Fill((byte)' ');
+                pw.Advance(writable);
+                totalBytes -= writable;
+            }
+        }
     }
 
     // ── WriteMinified ─────────────────────────────────────────────────────────
@@ -315,15 +343,17 @@ public static class JsonTranscoder
         return reader.BytesConsumed;
     }
 
-    // ── WriteProjection ───────────────────────────────────────────────────────
+    // ── WriteProjection (unified generic) ──────────────────────────────────────
 
-    private static long WriteProjection(
+    private static long WriteProjection<TRenderer, TFramer>(
         ProjectionState state,
         ReadResult readResult,
-        Utf8JsonWriter jwriter,
         PipeWriter pipeWriter,
-        byte[][] pattern
-    )
+        byte[][] pattern,
+        ref TRenderer renderer,
+        ref TFramer framer)
+        where TRenderer : struct, ITokenRenderer
+        where TFramer : struct, IItemFramer
     {
         var reader = new Utf8JsonReader(
             readResult.Buffer,
@@ -335,316 +365,50 @@ public static class JsonTranscoder
 
         while (hasToken)
         {
-            // ── PHASE 1: CAPTURE ───────────────────────────────────────────────
-            if (state.IsCapturing)
+            byte[]? rentedBuffer = null;
+            ParserDirective directive;
+            try
             {
-                if (reader.TokenType is JsonTokenType.StartObject or JsonTokenType.StartArray)
-                    state.CaptureDepth++;
-                else if (reader.TokenType is JsonTokenType.EndObject or JsonTokenType.EndArray)
-                    state.CaptureDepth--;
+                ReadOnlySpan<byte> name = reader.TokenType == JsonTokenType.PropertyName
+                    ? GetPropertyName(ref reader, ref rentedBuffer)
+                    : default;
 
-                WriteToken(reader, jwriter);
-
-                if (state.CaptureDepth == 0)
-                {
-                    state.IsCapturing = false;
-                    jwriter.Flush();
-                    pipeWriter.Write("\n"u8);
-                    jwriter.Reset();
-                }
-
-                hasToken = reader.Read();
-                continue;
+                directive = state.Advance(reader.TokenType, pattern, name);
+            }
+            finally
+            {
+                if (rentedBuffer != null)
+                    ArrayPool<byte>.Shared.Return(rentedBuffer);
             }
 
-            // ── PHASE 2: SEARCH ────────────────────────────────────────────────
-            bool startCaptureNow = false;
-
-            switch (reader.TokenType)
+            switch (directive)
             {
-                case JsonTokenType.PropertyName:
-                    state.PendingPropertyMatches = state.MatchedDepth == state.Depth
-                                                   && MatchesPropertyName(reader, pattern, state.MatchedDepth);
+                case ParserDirective.Skip:
                     break;
 
-                case JsonTokenType.StartObject:
-                case JsonTokenType.StartArray:
-                {
-                    bool isArray = reader.TokenType == JsonTokenType.StartArray;
-                    bool parentIsArray = state.Depth >= 0 && state.IsArray[state.Depth];
-
-                    bool seg = state.MatchedDepth == state.Depth
-                               && MatchesProjectionSegment(
-                                   state.MatchedDepth,
-                                   pattern,
-                                   parentIsArray,
-                                   state.PendingPropertyMatches
-                               );
-
-                    state.PendingPropertyMatches = false;
-
-                    state.Depth++;
-                    state.IsArray[state.Depth] = isArray;
-                    state.MatchedDepthStack[state.Depth] = state.MatchedDepth;
-
-                    if (seg && state.MatchedDepth + 1 == pattern.Length)
-                    {
-                        startCaptureNow = true;
-                        state.Depth--;
-                        state.MatchedDepth = state.MatchedDepthStack[state.Depth + 1];
-                    }
-                    else if (seg)
-                    {
-                        state.MatchedDepth++;
-                    }
-                    break;
-                }
-
-                case JsonTokenType.EndObject:
-                case JsonTokenType.EndArray:
-                    state.PendingPropertyMatches = false;
-                    if (state.Depth >= 0)
-                    {
-                        state.MatchedDepth = state.MatchedDepthStack[state.Depth];
-                        state.Depth--;
-                    }
+                case ParserDirective.YieldValue:
+                    renderer.WriteToken(ref reader, pipeWriter, readResult);
+                    renderer.Reset();
+                    framer.FinishItem(pipeWriter);
                     break;
 
-                default:
-                {
-                    bool parentIsArray = state.Depth >= 0 && state.IsArray[state.Depth];
+                case ParserDirective.BeginCapture:
+                    // Do not advance reader — capture phase will process
+                    // the current StartObject/StartArray on next iteration
+                    continue;
 
-                    bool seg = state.MatchedDepth == state.Depth
-                               && MatchesProjectionSegment(
-                                   state.MatchedDepth,
-                                   pattern,
-                                   parentIsArray,
-                                   state.PendingPropertyMatches
-                               );
-                    state.PendingPropertyMatches = false;
-
-                    if (seg && state.MatchedDepth + 1 == pattern.Length)
-                    {
-                        WriteToken(reader, jwriter);
-                        jwriter.Flush();
-                        pipeWriter.Write("\n"u8);
-                        jwriter.Reset();
-                    }
-                    break;
-                }
-            }
-
-            // ── PHASE TRANSITION ───────────────────────────────────────────────
-            if (startCaptureNow)
-            {
-                state.IsCapturing = true;
-                state.CaptureDepth = 0;
-                // Do not advance — capture phase will process the current StartObject/StartArray
-            }
-            else
-            {
-                hasToken = reader.Read();
-            }
-        }
-
-        state.ReaderState = reader.CurrentState;
-        return reader.BytesConsumed;
-
-        static void WriteToken(Utf8JsonReader r, Utf8JsonWriter w)
-        {
-            switch (r.TokenType)
-            {
-                case JsonTokenType.StartObject: w.WriteStartObject(); break;
-                case JsonTokenType.EndObject:   w.WriteEndObject(); break;
-                case JsonTokenType.StartArray:  w.WriteStartArray(); break;
-                case JsonTokenType.EndArray:    w.WriteEndArray(); break;
-                case JsonTokenType.True:        w.WriteBooleanValue(true); break;
-                case JsonTokenType.False:       w.WriteBooleanValue(false); break;
-                case JsonTokenType.Null:        w.WriteNullValue(); break;
-                
-                case JsonTokenType.Comment
-                  or JsonTokenType.PropertyName
-                  or JsonTokenType.String
-                  or JsonTokenType.Number: WriteTokenSequence(r, w); break;
-                
-                case JsonTokenType.None: break;
-            }
-            
-            static void WriteTokenSequence(Utf8JsonReader r, Utf8JsonWriter w)
-            {
-                if (!r.HasValueSequence)
-                {
-                    switch (r.TokenType)
-                    {
-                        case JsonTokenType.PropertyName: w.WritePropertyName(r.ValueSpan); break;
-                        case JsonTokenType.String: w.WriteStringValue(r.ValueSpan); break;
-                        case JsonTokenType.Number: w.WriteRawValue(r.ValueSpan, skipInputValidation: true); break;
-                    }
-                }
-                else
-                {
-                    int len = (int)r.ValueSequence.Length;
-                    byte[] rented = ArrayPool<byte>.Shared.Rent(len);
-                
-                    try
-                    {
-                        r.ValueSequence.CopyTo(rented);
-                        ReadOnlySpan<byte> span = rented.AsSpan(0, len);
-                        switch (r.TokenType)
-                        {
-                            case JsonTokenType.PropertyName: w.WritePropertyName(span); break;
-                            case JsonTokenType.String: w.WriteStringValue(span); break;
-                            case JsonTokenType.Number: w.WriteRawValue(span, skipInputValidation: true); break;
-                        }
-                    }
-                    finally
-                    {
-                        ArrayPool<byte>.Shared.Return(rented);
-                    }
-                }
-            }
-        }
-    }
-
-    private static long WriteProjectionDirect(
-        ProjectionState state,
-        ReadResult readResult,
-        PipeWriter pipeWriter,
-        byte[][] pattern
-    )
-    {
-        var reader = new Utf8JsonReader(
-            readResult.Buffer,
-            readResult.IsCompleted,
-            state.ReaderState
-        );
-
-        bool hasToken = reader.Read();
-
-        while (hasToken)
-        {
-            // ── PHASE 1: CAPTURE ───────────────────────────────────────────────
-            if (state.IsCapturing)
-            {
-                if (state.CaptureNeedsComma && reader.TokenType is not JsonTokenType.EndObject and not JsonTokenType.EndArray)
-                    pipeWriter.Write(","u8);
-
-                state.CaptureNeedsComma = reader.TokenType switch
-                {
-                    JsonTokenType.StartObject or JsonTokenType.StartArray or JsonTokenType.PropertyName => false,
-                    _ => true,
-                };
-
-                switch (reader.TokenType)
-                {
-                    case JsonTokenType.StartObject or JsonTokenType.StartArray:
-                        state.CaptureDepth++;
-                        break;
-                    case JsonTokenType.EndObject or JsonTokenType.EndArray:
-                        state.CaptureDepth--;
-                        break;
-                }
-
-                CopyToken(reader, pipeWriter, readResult);
-
-                if (state.CaptureDepth == 0)
-                {
-                    state.IsCapturing = false;
-                    pipeWriter.Write("\n"u8);
-                    state.CaptureNeedsComma = false;
-                }
-
-                hasToken = reader.Read();
-                continue;
-            }
-
-            // ── PHASE 2: SEARCH ────────────────────────────────────────────────
-            bool startCaptureNow = false;
-
-            switch (reader.TokenType)
-            {
-                case JsonTokenType.PropertyName:
-                    state.PendingPropertyMatches = state.MatchedDepth == state.Depth
-                                                   && MatchesPropertyName(reader, pattern, state.MatchedDepth);
+                case ParserDirective.Capture:
+                    renderer.WriteToken(ref reader, pipeWriter, readResult);
                     break;
 
-                case JsonTokenType.StartObject:
-                case JsonTokenType.StartArray:
-                {
-                    bool isArray = reader.TokenType == JsonTokenType.StartArray;
-                    bool parentIsArray = state.Depth >= 0 && state.IsArray[state.Depth];
-
-                    bool seg =
-                        state.MatchedDepth == state.Depth
-                        && MatchesProjectionSegment(
-                            state.MatchedDepth,
-                            pattern,
-                            parentIsArray,
-                            state.PendingPropertyMatches
-                        );
-                    state.PendingPropertyMatches = false;
-
-                    state.Depth++;
-                    state.IsArray[state.Depth] = isArray;
-                    state.MatchedDepthStack[state.Depth] = state.MatchedDepth;
-
-                    if (seg && state.MatchedDepth + 1 == pattern.Length)
-                    {
-                        startCaptureNow = true;
-                        state.Depth--;
-                        state.MatchedDepth = state.MatchedDepthStack[state.Depth + 1];
-                    }
-                    else if (seg)
-                    {
-                        state.MatchedDepth++;
-                    }
+                case ParserDirective.EndCapture:
+                    renderer.WriteToken(ref reader, pipeWriter, readResult);
+                    renderer.Reset();
+                    framer.FinishItem(pipeWriter);
                     break;
-                }
-
-                case JsonTokenType.EndObject:
-                case JsonTokenType.EndArray:
-                    state.PendingPropertyMatches = false;
-                    if (state.Depth >= 0)
-                    {
-                        state.MatchedDepth = state.MatchedDepthStack[state.Depth];
-                        state.Depth--;
-                    }
-                    break;
-
-                default:
-                {
-                    bool parentIsArray = state.Depth >= 0 && state.IsArray[state.Depth];
-
-                    bool seg = state.MatchedDepth == state.Depth
-                               && MatchesProjectionSegment(
-                                   state.MatchedDepth,
-                                   pattern,
-                                   parentIsArray,
-                                   state.PendingPropertyMatches
-                               );
-                    state.PendingPropertyMatches = false;
-
-                    if (seg && state.MatchedDepth + 1 == pattern.Length)
-                    {
-                        CopyToken(reader, pipeWriter, readResult);
-                        pipeWriter.Write("\n"u8);
-                    }
-                    break;
-                }
             }
 
-            // ── PHASE TRANSITION ───────────────────────────────────────────────
-            if (startCaptureNow)
-            {
-                state.IsCapturing = true;
-                state.CaptureDepth = 0;
-                state.CaptureNeedsComma = false;
-                // Do not advance — capture phase will process the current StartObject/StartArray
-            }
-            else
-            {
-                hasToken = reader.Read();
-            }
+            hasToken = reader.Read();
         }
 
         state.ReaderState = reader.CurrentState;
@@ -653,71 +417,203 @@ public static class JsonTranscoder
 
     // ── Shared helpers ────────────────────────────────────────────────────────
 
+    private static ReadOnlySpan<byte> GetPropertyName(
+        ref Utf8JsonReader reader,
+        ref byte[]? rentedBuffer)
+    {
+        if (!reader.HasValueSequence)
+            return reader.ValueSpan;
+
+        int len = (int)reader.ValueSequence.Length;
+        rentedBuffer = ArrayPool<byte>.Shared.Rent(len);
+        reader.ValueSequence.CopyTo(rentedBuffer);
+        return rentedBuffer.AsSpan(0, len);
+    }
+
     private static void CopyToken(
         Utf8JsonReader reader,
         PipeWriter pipeWriter,
         ReadResult readResult
     )
     {
-        var slice = readResult.Buffer.Slice(
-            reader.TokenStartIndex,
-            reader.BytesConsumed - reader.TokenStartIndex
-        );
-        
-        if (slice.IsSingleSegment)
-            pipeWriter.Write(slice.FirstSpan);
+        int start = (int)reader.TokenStartIndex;
+        int length = (int)(reader.BytesConsumed - reader.TokenStartIndex);
+
+        if (readResult.Buffer.IsSingleSegment)
+        {
+            pipeWriter.Write(readResult.Buffer.FirstSpan.Slice(start, length));
+        }
         else
+        {
+            var slice = readResult.Buffer.Slice(start, length);
             foreach (var seg in slice)
                 pipeWriter.Write(seg.Span);
+        }
     }
 
-    private static bool MatchesProjectionSegment(
-        int matchedDepth,
-        byte[][] pattern,
-        bool parentIsArray,
-        bool pendingPropertyMatches
-    )
+    // ── Directive & Strategy types ───────────────────────────────────────
+
+    private enum ParserDirective
     {
-        if (matchedDepth >= pattern.Length)
-            return false;
-
-        var seg = pattern[matchedDepth];
-        
-        if (seg.Length == 0)
-            return parentIsArray;
-
-        return !parentIsArray && pendingPropertyMatches;
+        Skip,
+        YieldValue,
+        BeginCapture,
+        Capture,
+        EndCapture,
     }
 
-    private static bool MatchesPropertyName(
-        Utf8JsonReader reader,
-        byte[][] pattern,
-        int matchedDepth
-    )
+    private interface ITokenRenderer
     {
-        if (matchedDepth >= pattern.Length)
-            return false;
+        void WriteToken(ref Utf8JsonReader reader, PipeWriter pipeWriter, ReadResult readResult);
+        void Reset();
+    }
 
-        var expected = pattern[matchedDepth];
-        if (expected.Length == 0)
-            return false;
+    private interface IItemFramer
+    {
+        void BeginDocument(PipeWriter pipeWriter);
+        void FinishItem(PipeWriter pipeWriter);
+        void EndDocument(PipeWriter pipeWriter);
+    }
 
-        if (reader.HasValueSequence)
+    // ── Strategy implementations ────────────────────────────────────────
+
+    private struct MinifiedRenderer : ITokenRenderer
+    {
+        private Utf8JsonWriter _jwriter;
+
+        public MinifiedRenderer(Utf8JsonWriter jwriter) => _jwriter = jwriter;
+
+        public void WriteToken(ref Utf8JsonReader reader, PipeWriter pipeWriter, ReadResult readResult)
         {
-            var remaining = expected.AsSpan();
-            foreach (var slice in reader.ValueSequence)
+            switch (reader.TokenType)
             {
-                if (slice.Length > remaining.Length)
-                    return false;
-                if (!slice.Span.SequenceEqual(remaining[..slice.Length]))
-                    return false;
-                remaining = remaining[slice.Length..];
-            }
+                case JsonTokenType.StartObject: _jwriter.WriteStartObject(); break;
+                case JsonTokenType.EndObject:   _jwriter.WriteEndObject(); break;
+                case JsonTokenType.StartArray:  _jwriter.WriteStartArray(); break;
+                case JsonTokenType.EndArray:    _jwriter.WriteEndArray(); break;
+                case JsonTokenType.True:        _jwriter.WriteBooleanValue(true); break;
+                case JsonTokenType.False:       _jwriter.WriteBooleanValue(false); break;
+                case JsonTokenType.Null:        _jwriter.WriteNullValue(); break;
 
-            return remaining.IsEmpty;
+                case JsonTokenType.PropertyName:
+                case JsonTokenType.String:
+                case JsonTokenType.Number:
+                    WriteValueToken(ref reader);
+                    break;
+
+                case JsonTokenType.Comment:
+                case JsonTokenType.None:
+                    break;
+            }
         }
 
-        return reader.ValueSpan.SequenceEqual(expected);
+        public void Reset()
+        {
+            _jwriter.Flush();
+            _jwriter.Reset();
+        }
+
+        private void WriteValueToken(ref Utf8JsonReader reader)
+        {
+            if (!reader.HasValueSequence)
+            {
+                switch (reader.TokenType)
+                {
+                    case JsonTokenType.PropertyName: _jwriter.WritePropertyName(reader.ValueSpan); break;
+                    case JsonTokenType.String:       _jwriter.WriteStringValue(reader.ValueSpan); break;
+                    case JsonTokenType.Number:       _jwriter.WriteRawValue(reader.ValueSpan, skipInputValidation: true); break;
+                }
+            }
+            else
+            {
+                int len = (int)reader.ValueSequence.Length;
+                byte[] rented = ArrayPool<byte>.Shared.Rent(len);
+                try
+                {
+                    reader.ValueSequence.CopyTo(rented);
+                    ReadOnlySpan<byte> span = rented.AsSpan(0, len);
+                    switch (reader.TokenType)
+                    {
+                        case JsonTokenType.PropertyName: _jwriter.WritePropertyName(span); break;
+                        case JsonTokenType.String:       _jwriter.WriteStringValue(span); break;
+                        case JsonTokenType.Number:       _jwriter.WriteRawValue(span, skipInputValidation: true); break;
+                    }
+                }
+                finally
+                {
+                    ArrayPool<byte>.Shared.Return(rented);
+                }
+            }
+        }
+    }
+
+    private struct VerbatimRenderer : ITokenRenderer
+    {
+        private bool _needsComma;
+
+        public void WriteToken(ref Utf8JsonReader reader, PipeWriter pipeWriter, ReadResult readResult)
+        {
+            if (_needsComma && reader.TokenType is not JsonTokenType.EndObject and not JsonTokenType.EndArray)
+                pipeWriter.Write(","u8);
+
+            _needsComma = reader.TokenType switch
+            {
+                JsonTokenType.StartObject or JsonTokenType.StartArray or JsonTokenType.PropertyName => false,
+                _ => true,
+            };
+
+            CopyToken(reader, pipeWriter, readResult);
+        }
+
+        public void Reset() => _needsComma = false;
+    }
+
+    private struct NdJsonFramer : IItemFramer
+    {
+        public void BeginDocument(PipeWriter pipeWriter) { }
+        public void FinishItem(PipeWriter pipeWriter) => pipeWriter.Write("\n"u8);
+        public void EndDocument(PipeWriter pipeWriter) { }
+    }
+
+    private struct JsonArrayFramer : IItemFramer
+    {
+        private bool _needsComma;
+
+        public void BeginDocument(PipeWriter pipeWriter) => pipeWriter.Write("["u8);
+
+        public void FinishItem(PipeWriter pipeWriter)
+        {
+            if (_needsComma)
+                pipeWriter.Write(","u8);
+            _needsComma = true;
+        }
+
+        public void EndDocument(PipeWriter pipeWriter) => pipeWriter.Write("]"u8);
+    }
+
+    private struct JsonEnvelopeFramer : IItemFramer
+    {
+        private bool _needsComma;
+        private int _count;
+
+        public void BeginDocument(PipeWriter pipeWriter) => pipeWriter.Write("{\"results\":["u8);
+
+        public void FinishItem(PipeWriter pipeWriter)
+        {
+            if (_needsComma)
+                pipeWriter.Write(","u8);
+            _needsComma = true;
+            _count++;
+        }
+
+        public void EndDocument(PipeWriter pipeWriter)
+        {
+            pipeWriter.Write("],\"count\":"u8);
+            Span<byte> buf = stackalloc byte[20];
+            if (System.Buffers.Text.Utf8Formatter.TryFormat(_count, buf, out int written))
+                pipeWriter.Write(buf[..written]);
+            pipeWriter.Write("}"u8);
+        }
     }
 
     // ── State classes ─────────────────────────────────────────────────────────
@@ -738,14 +634,130 @@ public static class JsonTranscoder
 
     private sealed class ProjectionState
     {
-        public int Depth = -1;
-        public int MatchedDepth;
-        public readonly bool[] IsArray = new bool[64];
-        public readonly int[] MatchedDepthStack = new int[64];
-        public bool PendingPropertyMatches;
-        public bool IsCapturing;
-        public int CaptureDepth;
-        public bool CaptureNeedsComma;
+        private int _depth = -1;
+        private int _matchedDepth;
+        private readonly bool[] _isArray = new bool[64];
+        private readonly int[] _matchedDepthStack = new int[64];
+        private bool _pendingPropertyMatches;
+        private bool _isCapturing;
+        private int _captureDepth;
         public JsonReaderState ReaderState;
+
+        public ParserDirective Advance(
+            JsonTokenType tokenType,
+            byte[][] pattern,
+            ReadOnlySpan<byte> propertyName = default)
+        {
+            // ── CAPTURE PHASE ─────────────────────────────────────────
+            if (_isCapturing)
+            {
+                if (tokenType is JsonTokenType.StartObject or JsonTokenType.StartArray)
+                    _captureDepth++;
+                else if (tokenType is JsonTokenType.EndObject or JsonTokenType.EndArray)
+                    _captureDepth--;
+
+                if (_captureDepth == 0)
+                {
+                    _isCapturing = false;
+                    return ParserDirective.EndCapture;
+                }
+
+                return ParserDirective.Capture;
+            }
+
+            // ── SEARCH PHASE ──────────────────────────────────────────
+            switch (tokenType)
+            {
+                case JsonTokenType.PropertyName:
+                    _pendingPropertyMatches = _matchedDepth == _depth
+                        && MatchesPropertyName(pattern, _matchedDepth, propertyName);
+                    return ParserDirective.Skip;
+
+                case JsonTokenType.StartObject:
+                case JsonTokenType.StartArray:
+                {
+                    bool isArray = tokenType == JsonTokenType.StartArray;
+                    bool parentIsArray = _depth >= 0 && _isArray[_depth];
+
+                    bool seg = _matchedDepth == _depth
+                        && MatchesSegment(_matchedDepth, pattern, parentIsArray, _pendingPropertyMatches);
+                    _pendingPropertyMatches = false;
+
+                    _depth++;
+                    _isArray[_depth] = isArray;
+                    _matchedDepthStack[_depth] = _matchedDepth;
+
+                    if (seg && _matchedDepth + 1 == pattern.Length)
+                    {
+                        _depth--;
+                        _matchedDepth = _matchedDepthStack[_depth + 1];
+                        _isCapturing = true;
+                        _captureDepth = 0;
+                        return ParserDirective.BeginCapture;
+                    }
+
+                    if (seg)
+                        _matchedDepth++;
+
+                    return ParserDirective.Skip;
+                }
+
+                case JsonTokenType.EndObject:
+                case JsonTokenType.EndArray:
+                    _pendingPropertyMatches = false;
+                    if (_depth >= 0)
+                    {
+                        _matchedDepth = _matchedDepthStack[_depth];
+                        _depth--;
+                    }
+                    return ParserDirective.Skip;
+
+                default:
+                {
+                    bool parentIsArray = _depth >= 0 && _isArray[_depth];
+
+                    bool seg = _matchedDepth == _depth
+                        && MatchesSegment(_matchedDepth, pattern, parentIsArray, _pendingPropertyMatches);
+                    _pendingPropertyMatches = false;
+
+                    if (seg && _matchedDepth + 1 == pattern.Length)
+                        return ParserDirective.YieldValue;
+
+                    return ParserDirective.Skip;
+                }
+            }
+        }
+
+        private static bool MatchesSegment(
+            int matchedDepth,
+            byte[][] pattern,
+            bool parentIsArray,
+            bool pendingPropertyMatches)
+        {
+            if (matchedDepth >= pattern.Length)
+                return false;
+
+            var seg = pattern[matchedDepth];
+
+            if (seg.Length == 0)
+                return parentIsArray;
+
+            return !parentIsArray && pendingPropertyMatches;
+        }
+
+        private static bool MatchesPropertyName(
+            byte[][] pattern,
+            int matchedDepth,
+            ReadOnlySpan<byte> propertyName)
+        {
+            if (matchedDepth >= pattern.Length)
+                return false;
+
+            var expected = pattern[matchedDepth];
+            if (expected.Length == 0)
+                return false;
+
+            return propertyName.SequenceEqual(expected);
+        }
     }
 }
