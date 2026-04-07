@@ -67,10 +67,13 @@ public class StreamingBenchmarks
             (itemBytes, _) =>
             {
                 WriteRawSequence(writer, itemBytes);
+                if (writer.BytesPending >= 16_384)
+                    writer.Flush();
+                if (writer.BytesPending >= 16_384)
+                    writer.Flush();
                 return ValueTask.CompletedTask;
             });
         writer.WriteEndArray();
-        await writer.FlushAsync();
     }
 
     // ── 4. ProjectItemsAsync: transform via JsonDocument ─────────────────
@@ -92,6 +95,8 @@ public class StreamingBenchmarks
                 writer.WriteNumber("id"u8, root.GetProperty("id").GetInt32());
                 writer.WriteString("title"u8, root.GetProperty("title").GetString());
                 writer.WriteEndObject();
+                if (writer.BytesPending >= 16_384)
+                    writer.Flush();
                 return ValueTask.CompletedTask;
             });
         writer.WriteEndArray();
@@ -135,6 +140,8 @@ public class StreamingBenchmarks
                     }
                 }
                 writer.WriteEndObject();
+                if (writer.BytesPending >= 16_384)
+                    writer.Flush();
                 return ValueTask.CompletedTask;
             });
         writer.WriteEndArray();
@@ -162,6 +169,8 @@ public class StreamingBenchmarks
                     writer.WriteString("title"u8, item.Title);
                     writer.WriteEndObject();
                 }
+                if (writer.BytesPending >= 16_384)
+                    writer.Flush();
                 return ValueTask.CompletedTask;
             });
         writer.WriteEndArray();
@@ -187,6 +196,8 @@ public class StreamingBenchmarks
                     var slim = new BenchItemSlim { Id = item.Id, Title = item.Title };
                     JsonSerializer.Serialize(writer, slim, BenchJsonContext.Default.BenchItemSlim);
                 }
+                if (writer.BytesPending >= 16_384)
+                    writer.Flush();
                 return ValueTask.CompletedTask;
             });
         writer.WriteEndArray();
