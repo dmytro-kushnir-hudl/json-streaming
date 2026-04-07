@@ -16,7 +16,7 @@ namespace JsonStreaming;
 /// </list>
 ///
 /// All methods respect backpressure: they flush to the writer when the unflushed
-/// buffer exceeds 16 KB, matching <see cref="WriteOptions.FlushThreshold"/>.
+/// buffer exceeds 16 KB.
 /// </summary>
 public static class JsonTranscoder
 {
