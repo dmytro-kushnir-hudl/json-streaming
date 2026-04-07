@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.IO.Pipelines;
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 
 namespace JsonStreaming.Tests;
@@ -11,48 +12,48 @@ public class NiveHumanTests(ITestOutputHelper output)
 
     // language=JSON
     const string JsonObject = """
-        { "name"   : "Alice Brown",
-          "sku"    : "54321",
-          "price"  : 199.95,
-          "shipTo" : { "name" : "Bob Brown",
-                       "address" : "456 Oak Lane",
-                       "city" : "Pretendville",
-                       "state" : "HI",
-                       "zip"   : "98999" },
-          "billTo" : { "name" : "Alice Brown",
-                       "address" : "456 Oak Lane",
-                       "city" : "Pretendville",
-                       "state" : "HI",
-                       "zip"   : "98999" }
-        }
-        """;
+                              { "name"   : "Alice Brown",
+                                "sku"    : "54321",
+                                "price"  : 199.95,
+                                "shipTo" : { "name" : "Bob Brown",
+                                             "address" : "456 Oak Lane",
+                                             "city" : "Pretendville",
+                                             "state" : "HI",
+                                             "zip"   : "98999" },
+                                "billTo" : { "name" : "Alice Brown",
+                                             "address" : "456 Oak Lane",
+                                             "city" : "Pretendville",
+                                             "state" : "HI",
+                                             "zip"   : "98999" }
+                              }
+                              """;
 
     // language=JSON
     const string JsonArray = """
-        [
-            {
-            "name": "Adeel Solangi",
-            "language": "Sindhi",
-            "id": "V59OF92YF627HFY0",
-            "bio": "Donec lobortis eleifend condimentum. Cras dictum dolor lacinia lectus vehicula rutrum. Maecenas quis nisi nunc. Nam tristique feugiat est vitae mollis. Maecenas quis nisi nunc.",
-            "version": 6.1
-            },
-            {
-            "name": "Afzal Ghaffar",
-            "language": "Sindhi",
-            "id": "ENTOCR13RSCLZ6KU",
-            "bio": "Aliquam sollicitudin ante ligula, eget malesuada nibh efficitur et. Pellentesque massa sem, scelerisque sit amet odio id, cursus tempor urna. Etiam congue dignissim volutpat. Vestibulum pharetra libero et velit gravida euismod.",
-            "version": 1.88
-            },
-            {
-            "name": "Aamir Solangi",
-            "language": "Sindhi",
-            "id": "IAKPO3R4761JDRVG",
-            "bio": "Vestibulum pharetra libero et velit gravida euismod. Quisque mauris ligula, efficitur porttitor sodales ac, lacinia non ex. Fusce eu ultrices elit, vel posuere neque.",
-            "version": 7.27
-            }
-        ]
-        """;
+                             [
+                                 {
+                                 "name": "Adeel Solangi",
+                                 "language": "Sindhi",
+                                 "id": "V59OF92YF627HFY0",
+                                 "bio": "Donec lobortis eleifend condimentum. Cras dictum dolor lacinia lectus vehicula rutrum. Maecenas quis nisi nunc. Nam tristique feugiat est vitae mollis. Maecenas quis nisi nunc.",
+                                 "version": 6.1
+                                 },
+                                 {
+                                 "name": "Afzal Ghaffar",
+                                 "language": "Sindhi",
+                                 "id": "ENTOCR13RSCLZ6KU",
+                                 "bio": "Aliquam sollicitudin ante ligula, eget malesuada nibh efficitur et. Pellentesque massa sem, scelerisque sit amet odio id, cursus tempor urna. Etiam congue dignissim volutpat. Vestibulum pharetra libero et velit gravida euismod.",
+                                 "version": 1.88
+                                 },
+                                 {
+                                 "name": "Aamir Solangi",
+                                 "language": "Sindhi",
+                                 "id": "IAKPO3R4761JDRVG",
+                                 "bio": "Vestibulum pharetra libero et velit gravida euismod. Quisque mauris ligula, efficitur porttitor sodales ac, lacinia non ex. Fusce eu ultrices elit, vel posuere neque.",
+                                 "version": 7.27
+                                 }
+                             ]
+                             """;
 
     [Theory]
     [InlineData(JsonObject)]
@@ -136,106 +137,102 @@ public class NiveHumanTests(ITestOutputHelper output)
         output.WriteLine(sb.ToString());
     }
 
-    [Fact]
-    public async Task PipeIt()
+    [Theory]
+    [InlineData("64KB-min.json")]
+    [InlineData("128KB-min.json")]
+    [InlineData("256KB-min.json")]
+    [InlineData("512KB-min.json")]
+    [InlineData("1MB-min.json")]
+    [InlineData("5MB-min.json")]
+    [InlineData("64KB.json")]
+    [InlineData("128KB.json")]
+    [InlineData("256KB.json")]
+    [InlineData("512KB.json")]
+    [InlineData("1MB.json")]
+    [InlineData("5MB.json")]
+    public async Task PipeIt_Handrolled(string fileName)
     {
         var ct = TestContext.Current.CancellationToken;
-
-        const string kbJson = "64KB.json";
-        var request = new HttpRequestMessage(
-            HttpMethod.Get,
-            $"https://microsoftedge.github.io/Demos/json-dummy-data/{kbJson}"
-        );
-        var response = await Client.SendAsync(
-            request,
-            HttpCompletionOption.ResponseHeadersRead,
+        var uri = $"https://microsoftedge.github.io/Demos/json-dummy-data/{fileName}";
+        var rawBytes = await Client.GetByteArrayAsync(
+            uri,
             ct
         );
-        var stream = await response.Content.ReadAsStreamAsync(ct);
-        var reader = PipeReader.Create(stream);
-        if (File.Exists(kbJson))
-            File.Delete(kbJson);
-        var writer = PipeWriter.Create(File.OpenWrite(kbJson));
 
-        while (true)
-        {
-            ReadResult result = await reader.ReadAsync(ct);
-            ReadOnlySequence<byte> buffer = result.Buffer;
+        // Expected: round-trip through JsonDocument + JsonSerializer with indentation
+        var expected = JsonSerializer.Serialize(
+            JsonDocument.Parse(rawBytes).RootElement,
+            new JsonSerializerOptions { WriteIndented = true, Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping }
+        );
 
-            if (!buffer.IsEmpty)
-            {
-                foreach (var segment in buffer)
-                    writer.Write(segment.Span);
+        // Actual: stream through ProxyFormattedJsonAsync
+        var inputPipe = PipeReader.Create(await Client.GetStreamAsync(uri, ct));
+        var outputStream = new MemoryStream();
+        var outputPipe = PipeWriter.Create(outputStream);
+        await inputPipe.ProxyFormattedJsonAsync(outputPipe, default, ct);
+        await outputPipe.CompleteAsync();
+        var actual = Encoding.UTF8.GetString(outputStream.ToArray());
 
-                var flush = await writer.FlushAsync(ct);
-                if (flush.IsCompleted || flush.IsCanceled)
-                    break;
-            }
-
-            // Mark everything as consumed
-            reader.AdvanceTo(buffer.End);
-
-            if (result.IsCompleted || result.IsCanceled)
-                break;
-        }
-
-        await writer.CompleteAsync();
-
-        Console.WriteLine(await File.ReadAllTextAsync(kbJson, ct));
+        Assert.Equal(expected, actual);
     }
 
-    [Fact]
-    public async Task PipeIt_smart()
+    [Theory]
+    [InlineData("64KB-min.json")]
+    [InlineData("128KB-min.json")]
+    [InlineData("256KB-min.json")]
+    [InlineData("512KB-min.json")]
+    [InlineData("1MB-min.json")]
+    [InlineData("5MB-min.json")]
+    [InlineData("64KB.json")]
+    [InlineData("128KB.json")]
+    [InlineData("256KB.json")]
+    [InlineData("512KB.json")]
+    [InlineData("1MB.json")]
+    [InlineData("5MB.json")]
+    public async Task PipeIt_Handrolled_Min(string fileName)
     {
         var ct = TestContext.Current.CancellationToken;
-
-        const string kbJson = "64KB.json";
-        var request = new HttpRequestMessage(
-            HttpMethod.Get,
-            $"https://microsoftedge.github.io/Demos/json-dummy-data/{kbJson}"
-        );
-        var response = await Client.SendAsync(
-            request,
-            HttpCompletionOption.ResponseHeadersRead,
+        var uri = $"https://microsoftedge.github.io/Demos/json-dummy-data/{fileName}";
+        var rawBytes = await Client.GetByteArrayAsync(
+            uri,
             ct
         );
-        var stream = await response.Content.ReadAsStreamAsync(ct);
-        var reader = PipeReader.Create(stream);
-        if (File.Exists(kbJson))
-            File.Delete(kbJson);
-        var writer = PipeWriter.Create(File.OpenWrite(kbJson));
 
-        await reader.CopyToAsync(writer, ct);
-        await writer.CompleteAsync();
+        // Expected: round-trip through JsonDocument + JsonSerializer with indentation
+        var expected = JsonSerializer.Serialize(
+            JsonDocument.Parse(rawBytes).RootElement,
+            new JsonSerializerOptions { WriteIndented = false, Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping }
+        );
 
-        Console.WriteLine(await File.ReadAllTextAsync(kbJson, ct));
+        // Actual: stream through ProxyFormattedJsonAsync
+        var inputPipe = PipeReader.Create(await Client.GetStreamAsync(uri, ct));
+        var outputStream = new MemoryStream();
+        var outputPipe = PipeWriter.Create(outputStream);
+        await inputPipe.ProxyMinifiedJsonAsync(outputPipe, default, ct);
+        await outputPipe.CompleteAsync();
+        var actual = Encoding.UTF8.GetString(outputStream.ToArray());
+
+        Assert.Equal(expected, actual);
     }
-    
-    [Fact]
-    public async Task PipeIt_Handrolled()
+
+    [Theory]
+    [InlineData("missing-colon.json")]
+    [InlineData("unterminated.json")]
+    [InlineData("binary-data.json")]
+    public async Task PipeIt_Handrolled_Malformed(string fileName)
     {
         var ct = TestContext.Current.CancellationToken;
 
-        const string kbJson = "64KB.json";
-        var request = new HttpRequestMessage(
-            HttpMethod.Get,
-            $"https://microsoftedge.github.io/Demos/json-dummy-data/{kbJson}"
-        );
-        var response = await Client.SendAsync(
-            request,
-            HttpCompletionOption.ResponseHeadersRead,
+        var rawBytes = await Client.GetByteArrayAsync(
+            $"https://microsoftedge.github.io/Demos/json-dummy-data/{fileName}",
             ct
         );
-        var stream = await response.Content.ReadAsStreamAsync(ct);
-        var reader = PipeReader.Create(stream);
-        if (File.Exists(kbJson))
-            File.Delete(kbJson);
-        var writer = PipeWriter.Create(File.OpenWrite(kbJson));
 
-        await Logic.ProxyFormattedJsonAsync(reader, writer, ct);
-        await writer.CompleteAsync();
+        var inputPipe = PipeReader.Create(new MemoryStream(rawBytes));
+        var outputPipe = PipeWriter.Create(new MemoryStream());
 
-        Console.WriteLine(await File.ReadAllTextAsync(kbJson, ct));
+        await Assert.ThrowsAnyAsync<JsonException>(() => inputPipe.ProxyFormattedJsonAsync(outputPipe, default, ct)
+        );
     }
 }
 
@@ -247,15 +244,59 @@ public class CustomState
     public JsonReaderState State;
 }
 
+public class CustomStateMin
+{
+    public bool NeedsComma;
+    public JsonReaderState State;
+}
+
 public static class Logic
 {
+    public static async Task ProxyMinifiedJsonAsync(
+        this PipeReader reader,
+        PipeWriter writer,
+        JsonReaderOptions options = default,
+        CancellationToken ct = default)
+    {
+        var readerState = new JsonReaderState(options);
+        var customState = new CustomStateMin
+        {
+            State = readerState,
+        };
+
+        ct.ThrowIfCancellationRequested();
+
+        while (true)
+        {
+            var result = await reader.ReadAsync(ct);
+            var buffer = result.Buffer;
+            var consumed = buffer.Start;
+
+            try
+            {
+                ct.ThrowIfCancellationRequested();
+
+                var bytesConsumed = WriteMin(customState, result, writer);
+                consumed = buffer.GetPosition(bytesConsumed);
+                if (result.IsCompleted || writer.UnflushedBytes >= 16 * 1024)
+                    await writer.FlushAsync(ct);
+
+                if (result.IsCompleted)
+                    break;
+            }
+            finally
+            {
+                reader.AdvanceTo(consumed, buffer.End);
+            }
+        }
+    }
+
     public static async Task ProxyFormattedJsonAsync(
         this PipeReader reader,
         PipeWriter writer,
-        CancellationToken ct
-    )
+        JsonReaderOptions options = default,
+        CancellationToken ct = default)
     {
-        var options = new JsonReaderOptions();
         var readerState = new JsonReaderState(options);
         var customState = new CustomState
         {
@@ -265,19 +306,30 @@ public static class Logic
             State = readerState,
         };
 
-        if (ct.IsCancellationRequested)
-            return await Task.FromCanceled(ct);
+        ct.ThrowIfCancellationRequested();
 
         while (true)
         {
             var result = await reader.ReadAsync(ct);
-            var consumed = Write(customState, result, writer);
-            
-            reader.AdvanceTo(result.Buffer.End);
-            await writer.FlushAsync(ct);
-            
-            if (result.IsCompleted)
-                break;
+            var buffer = result.Buffer;
+            var consumed = buffer.Start;
+
+            try
+            {
+                ct.ThrowIfCancellationRequested();
+
+                var bytesConsumed = Write(customState, result, writer);
+                consumed = buffer.GetPosition(bytesConsumed);
+                if (result.IsCompleted || writer.UnflushedBytes >= 16 * 1024)
+                    await writer.FlushAsync(ct);
+
+                if (result.IsCompleted)
+                    break;
+            }
+            finally
+            {
+                reader.AdvanceTo(consumed, buffer.End);
+            }
         }
     }
 
@@ -335,12 +387,9 @@ public static class Logic
                     break;
 
                 case JsonTokenType.PropertyName:
-                    {
-                        CopyToken(reader, pipeWriter, readResult);
-                        pipeWriter.Write(":"u8);
-                        state.AfterColon = true;
-                        state.NeedsComma = false;
-                    }
+                    CopyToken(reader, pipeWriter, readResult);
+                    state.AfterColon = true;
+                    state.NeedsComma = false;
                     break;
 
                 case JsonTokenType.Comment:
@@ -360,19 +409,6 @@ public static class Logic
         state.State = reader.CurrentState;
         return reader.BytesConsumed;
 
-        static void CopyToken(Utf8JsonReader reader, PipeWriter pipeWriter, ReadResult readResult)
-        {
-            var quotedString = readResult.Buffer.Slice(
-                reader.TokenStartIndex,
-                reader.BytesConsumed - reader.TokenStartIndex
-            );
-            if (quotedString.IsSingleSegment)
-                pipeWriter.Write(quotedString.FirstSpan);
-            else
-                foreach (var seg in quotedString)
-                    pipeWriter.Write(seg.Span);
-        }
-
         static void WriteIndent(PipeWriter pipeWriter, int indent)
         {
             for (int i = 0; i < indent; i++)
@@ -380,82 +416,40 @@ public static class Logic
         }
     }
 
-    public static Task CopyToAsync2(
-        this PipeReader source,
-        PipeWriter destination,
-        CancellationToken ct = default
-    )
+    private static long WriteMin(CustomStateMin state, ReadResult readResult, PipeWriter pipeWriter)
     {
-        if (destination is null)
+        var reader = new Utf8JsonReader(readResult.Buffer, readResult.IsCompleted, state.State);
+
+        while (reader.Read())
         {
-            ThrowHelper.ThrowArgumentNullException();
+            if (state.NeedsComma && reader.TokenType is not JsonTokenType.EndObject and not JsonTokenType.EndArray)
+                pipeWriter.Write(","u8);
+
+            state.NeedsComma = reader.TokenType switch
+            {
+                JsonTokenType.StartObject or JsonTokenType.StartArray or JsonTokenType.PropertyName => false,
+                _ => true
+            };
+
+            CopyToken(reader, pipeWriter, readResult);
         }
 
-        if (ct.IsCancellationRequested)
-        {
-            return Task.FromCanceled(ct);
-        }
-
-        return source.CopyToAsyncCore(destination, ct);
+        state.State = reader.CurrentState;
+        return reader.BytesConsumed;
     }
 
-    private static async Task CopyToAsyncCore(
-        this PipeReader reader,
-        PipeWriter destination,
-        CancellationToken ct
-    )
+    static void CopyToken(Utf8JsonReader reader, PipeWriter pipeWriter, ReadResult readResult)
     {
-        while (true)
-        {
-            ReadResult result = await reader.ReadAsync(ct).ConfigureAwait(false);
-            ReadOnlySequence<byte> buffer = result.Buffer;
-            SequencePosition position = buffer.Start;
-            SequencePosition consumed = position;
+        var quotedString = readResult.Buffer.Slice(
+            reader.TokenStartIndex,
+            reader.BytesConsumed - reader.TokenStartIndex
+        );
 
-            try
-            {
-                if (result.IsCanceled)
-                {
-                    ThrowHelper.ThrowOperationCanceledException_ReadCanceled();
-                }
-
-                while (buffer.TryGet(ref position, out ReadOnlyMemory<byte> memory))
-                {
-                    if (memory.IsEmpty)
-                    {
-                        // advance tracking only (to account for any boundary scenarios)
-                        consumed = position;
-                    }
-                    else
-                    {
-                        // write and advance
-                        FlushResult flushResult = await destination
-                            .WriteAsync(memory, ct)
-                            .ConfigureAwait(false);
-
-                        if (flushResult.IsCanceled)
-                            ThrowHelper.ThrowOperationCanceledException_FlushCanceled();
-
-                        consumed = position;
-
-                        if (flushResult.IsCompleted)
-                            return;
-                    }
-                }
-
-                // The while loop completed successfully, so we've consumed the entire buffer.
-                consumed = buffer.End;
-
-                if (result.IsCompleted)
-                    break;
-            }
-            finally
-            {
-                // Advance even if WriteAsync throws so the PipeReader is not left in the
-                // currently reading state
-                reader.AdvanceTo(consumed);
-            }
-        }
+        if (quotedString.IsSingleSegment)
+            pipeWriter.Write(quotedString.FirstSpan);
+        else
+            foreach (var seg in quotedString)
+                pipeWriter.Write(seg.Span);
     }
 }
 
