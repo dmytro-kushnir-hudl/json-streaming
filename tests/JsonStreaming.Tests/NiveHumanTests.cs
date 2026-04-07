@@ -236,20 +236,6 @@ public class NiveHumanTests(ITestOutputHelper output)
     }
 }
 
-public class CustomState
-{
-    public int Depth;
-    public bool NeedsComma;
-    public bool AfterColon;
-    public JsonReaderState State;
-}
-
-public class CustomStateMin
-{
-    public bool NeedsComma;
-    public JsonReaderState State;
-}
-
 public static class Logic
 {
     public static async Task ProxyMinifiedJsonAsync(
@@ -259,7 +245,7 @@ public static class Logic
         CancellationToken ct = default)
     {
         var readerState = new JsonReaderState(options);
-        var customState = new CustomStateMin
+        var customState = new MinifiedState
         {
             State = readerState,
         };
@@ -276,7 +262,7 @@ public static class Logic
             {
                 ct.ThrowIfCancellationRequested();
 
-                var bytesConsumed = WriteMin(customState, result, writer);
+                var bytesConsumed = WriteMinified(customState, result, writer);
                 consumed = buffer.GetPosition(bytesConsumed);
                 if (result.IsCompleted || writer.UnflushedBytes >= 16 * 1024)
                     await writer.FlushAsync(ct);
@@ -298,7 +284,7 @@ public static class Logic
         CancellationToken ct = default)
     {
         var readerState = new JsonReaderState(options);
-        var customState = new CustomState
+        var customState = new FormattedState
         {
             Depth = 0,
             NeedsComma = false,
@@ -318,7 +304,7 @@ public static class Logic
             {
                 ct.ThrowIfCancellationRequested();
 
-                var bytesConsumed = Write(customState, result, writer);
+                var bytesConsumed = WriteFormatted(customState, result, writer);
                 consumed = buffer.GetPosition(bytesConsumed);
                 if (result.IsCompleted || writer.UnflushedBytes >= 16 * 1024)
                     await writer.FlushAsync(ct);
@@ -333,7 +319,7 @@ public static class Logic
         }
     }
 
-    private static long Write(CustomState state, ReadResult readResult, PipeWriter pipeWriter)
+    private static long WriteFormatted(FormattedState state, ReadResult readResult, PipeWriter pipeWriter)
     {
         var reader = new Utf8JsonReader(readResult.Buffer, readResult.IsCompleted, state.State);
 
@@ -416,7 +402,7 @@ public static class Logic
         }
     }
 
-    private static long WriteMin(CustomStateMin state, ReadResult readResult, PipeWriter pipeWriter)
+    private static long WriteMinified(MinifiedState state, ReadResult readResult, PipeWriter pipeWriter)
     {
         var reader = new Utf8JsonReader(readResult.Buffer, readResult.IsCompleted, state.State);
 
@@ -438,7 +424,7 @@ public static class Logic
         return reader.BytesConsumed;
     }
 
-    static void CopyToken(Utf8JsonReader reader, PipeWriter pipeWriter, ReadResult readResult)
+    private static void CopyToken(Utf8JsonReader reader, PipeWriter pipeWriter, ReadResult readResult)
     {
         var quotedString = readResult.Buffer.Slice(
             reader.TokenStartIndex,
@@ -451,22 +437,18 @@ public static class Logic
             foreach (var seg in quotedString)
                 pipeWriter.Write(seg.Span);
     }
-}
 
-internal static class ThrowHelper
-{
-    public static void ThrowOperationCanceledException_FlushCanceled()
+    private class FormattedState
     {
-        throw new NotImplementedException();
+        public int Depth;
+        public bool NeedsComma;
+        public bool AfterColon;
+        public JsonReaderState State;
     }
 
-    public static void ThrowOperationCanceledException_ReadCanceled()
+    private class MinifiedState
     {
-        throw new NotImplementedException();
-    }
-
-    public static void ThrowArgumentNullException()
-    {
-        throw new NotImplementedException();
+        public bool NeedsComma;
+        public JsonReaderState State;
     }
 }
