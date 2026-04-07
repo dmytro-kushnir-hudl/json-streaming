@@ -333,6 +333,7 @@ public static class JsonTranscoder
 
         while (reader.Read())
         {
+            // we are in the relevant section - write
             if (state.CaptureDepth > 0)
             {
                 if (reader.TokenType is JsonTokenType.StartObject or JsonTokenType.StartArray)
@@ -351,6 +352,7 @@ public static class JsonTranscoder
                 continue;
             }
 
+            // test next token
             switch (reader.TokenType)
             {
                 case JsonTokenType.PropertyName:
@@ -410,14 +412,13 @@ public static class JsonTranscoder
                 {
                     bool parentIsArray = state.Depth >= 0 && state.IsArray[state.Depth];
 
-                    bool seg =
-                        state.MatchedDepth == state.Depth
-                        && MatchesProjectionSegment(
-                            state.MatchedDepth,
-                            pattern,
-                            parentIsArray,
-                            state.PendingPropertyMatches
-                        );
+                    bool seg = state.MatchedDepth == state.Depth
+                               && MatchesProjectionSegment(
+                                   state.MatchedDepth,
+                                   pattern,
+                                   parentIsArray,
+                                   state.PendingPropertyMatches
+                               );
                     state.PendingPropertyMatches = false;
 
                     if (seg && state.MatchedDepth + 1 == pattern.Length)
