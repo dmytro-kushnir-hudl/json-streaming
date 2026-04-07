@@ -30,7 +30,7 @@ public class JsonTranscoderTests
         var writer = PipeWriter.Create(output);
 
         if (direct)
-            await pipe.ProjectNdJsonDirectAsync(path, writer);
+            await pipe.ProjectNdJsonVerbatimAsync(path, writer);
         else
             await pipe.ProjectNdJsonAsync(path, writer);
 

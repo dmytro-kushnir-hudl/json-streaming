@@ -455,7 +455,7 @@ app.MapGet(
             ct
         );
 
-        await upstream.Pipe.ProjectNdJsonDirectAsync(
+        await upstream.Pipe.ProjectNdJsonVerbatimAsync(
             NdJsonPath.At("products").Each().Key("title"),
             ctx.Response.BodyWriter,
             ct: ct

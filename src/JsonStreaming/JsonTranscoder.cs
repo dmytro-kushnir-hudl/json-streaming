@@ -167,7 +167,7 @@ public static class JsonTranscoder
     /// (newline-delimited) to <paramref name="writer"/> by copying raw token slices
     /// directly from the input buffer.
     /// </summary>
-    public static async Task ProjectNdJsonDirectAsync(
+    public static async Task ProjectNdJsonVerbatimAsync(
         this PipeReader reader,
         NdJsonPath path,
         PipeWriter writer,
@@ -354,9 +354,8 @@ public static class JsonTranscoder
             switch (reader.TokenType)
             {
                 case JsonTokenType.PropertyName:
-                    state.PendingPropertyMatches =
-                        state.MatchedDepth == state.Depth
-                        && MatchesPropertyName(reader, pattern, state.MatchedDepth);
+                    state.PendingPropertyMatches = state.MatchedDepth == state.Depth
+                                                   && MatchesPropertyName(reader, pattern, state.MatchedDepth);
                     break;
 
                 case JsonTokenType.StartObject:
@@ -365,14 +364,14 @@ public static class JsonTranscoder
                     bool isArray = reader.TokenType == JsonTokenType.StartArray;
                     bool parentIsArray = state.Depth >= 0 && state.IsArray[state.Depth];
 
-                    bool seg =
-                        state.MatchedDepth == state.Depth
-                        && MatchesProjectionSegment(
-                            state.MatchedDepth,
-                            pattern,
-                            parentIsArray,
-                            state.PendingPropertyMatches
-                        );
+                    bool seg = state.MatchedDepth == state.Depth
+                               && MatchesProjectionSegment(
+                                   state.MatchedDepth,
+                                   pattern,
+                                   parentIsArray,
+                                   state.PendingPropertyMatches
+                               );
+                    
                     state.PendingPropertyMatches = false;
 
                     state.Depth++;
@@ -385,6 +384,7 @@ public static class JsonTranscoder
                             jwriter.WriteStartArray();
                         else
                             jwriter.WriteStartObject();
+                        
                         state.CaptureDepth = 1;
                         state.Depth--;
                         state.MatchedDepth = state.MatchedDepthStack[state.Depth + 1];
@@ -435,76 +435,58 @@ public static class JsonTranscoder
         state.ReaderState = reader.CurrentState;
         return reader.BytesConsumed;
 
-        static void WriteTokenSequence(Utf8JsonReader r, Utf8JsonWriter w)
-        {
-            int len = (int)r.ValueSequence.Length;
-            byte[] rented = ArrayPool<byte>.Shared.Rent(len);
-            try
-            {
-                r.ValueSequence.CopyTo(rented);
-                ReadOnlySpan<byte> span = rented.AsSpan(0, len);
-                switch (r.TokenType)
-                {
-                    case JsonTokenType.PropertyName:
-                        w.WritePropertyName(span);
-                        break;
-                    case JsonTokenType.String:
-                        w.WriteStringValue(span);
-                        break;
-                    case JsonTokenType.Number:
-                        w.WriteRawValue(span, skipInputValidation: true);
-                        break;
-                }
-            }
-            finally
-            {
-                ArrayPool<byte>.Shared.Return(rented);
-            }
-        }
-
         static void WriteToken(Utf8JsonReader r, Utf8JsonWriter w)
         {
             switch (r.TokenType)
             {
-                case JsonTokenType.StartObject:
-                    w.WriteStartObject();
-                    break;
-                case JsonTokenType.EndObject:
-                    w.WriteEndObject();
-                    break;
-                case JsonTokenType.StartArray:
-                    w.WriteStartArray();
-                    break;
-                case JsonTokenType.EndArray:
-                    w.WriteEndArray();
-                    break;
-                case JsonTokenType.PropertyName:
-                    if (r.HasValueSequence)
-                        WriteTokenSequence(r, w);
-                    else
-                        w.WritePropertyName(r.ValueSpan);
-                    break;
-                case JsonTokenType.String:
-                    if (r.HasValueSequence)
-                        WriteTokenSequence(r, w);
-                    else
-                        w.WriteStringValue(r.ValueSpan);
-                    break;
-                case JsonTokenType.Number:
-                    if (r.HasValueSequence)
-                        WriteTokenSequence(r, w);
-                    else
-                        w.WriteRawValue(r.ValueSpan, skipInputValidation: true);
-                    break;
-                case JsonTokenType.True:
-                    w.WriteBooleanValue(true);
-                    break;
-                case JsonTokenType.False:
-                    w.WriteBooleanValue(false);
-                    break;
-                case JsonTokenType.Null:
-                    w.WriteNullValue();
-                    break;
+                case JsonTokenType.StartObject: w.WriteStartObject(); break;
+                case JsonTokenType.EndObject:   w.WriteEndObject(); break;
+                case JsonTokenType.StartArray:  w.WriteStartArray(); break;
+                case JsonTokenType.EndArray:    w.WriteEndArray(); break;
+                case JsonTokenType.True:        w.WriteBooleanValue(true); break;
+                case JsonTokenType.False:       w.WriteBooleanValue(false); break;
+                case JsonTokenType.Null:        w.WriteNullValue(); break;
+                
+                case JsonTokenType.Comment
+                  or JsonTokenType.PropertyName
+                  or JsonTokenType.String
+                  or JsonTokenType.Number: WriteTokenSequence(r, w); break;
+                
+                case JsonTokenType.None: break;
+            }
+            
+            static void WriteTokenSequence(Utf8JsonReader r, Utf8JsonWriter w)
+            {
+                if (!r.HasValueSequence)
+                {
+                    switch (r.TokenType)
+                    {
+                        case JsonTokenType.PropertyName: w.WritePropertyName(r.ValueSpan); break;
+                        case JsonTokenType.String: w.WriteStringValue(r.ValueSpan); break;
+                        case JsonTokenType.Number: w.WriteRawValue(r.ValueSpan, skipInputValidation: true); break;
+                    }
+                }
+                else
+                {
+                    int len = (int)r.ValueSequence.Length;
+                    byte[] rented = ArrayPool<byte>.Shared.Rent(len);
+                
+                    try
+                    {
+                        r.ValueSequence.CopyTo(rented);
+                        ReadOnlySpan<byte> span = rented.AsSpan(0, len);
+                        switch (r.TokenType)
+                        {
+                            case JsonTokenType.PropertyName: w.WritePropertyName(span); break;
+                            case JsonTokenType.String: w.WriteStringValue(span); break;
+                            case JsonTokenType.Number: w.WriteRawValue(span, skipInputValidation: true); break;
+                        }
+                    }
+                    finally
+                    {
+                        ArrayPool<byte>.Shared.Return(rented);
+                    }
+                }
             }
         }
     }
@@ -526,24 +508,24 @@ public static class JsonTranscoder
         {
             if (state.CaptureDepth > 0)
             {
-                if (
-                    state.CaptureNeedsComma
-                    && reader.TokenType is not JsonTokenType.EndObject and not JsonTokenType.EndArray
-                )
+                if (state.CaptureNeedsComma && reader.TokenType is not JsonTokenType.EndObject and not JsonTokenType.EndArray)
                     pipeWriter.Write(","u8);
 
                 state.CaptureNeedsComma = reader.TokenType switch
                 {
-                    JsonTokenType.StartObject
-                    or JsonTokenType.StartArray
-                    or JsonTokenType.PropertyName => false,
+                    JsonTokenType.StartObject or JsonTokenType.StartArray or JsonTokenType.PropertyName => false,
                     _ => true,
                 };
 
-                if (reader.TokenType is JsonTokenType.StartObject or JsonTokenType.StartArray)
-                    state.CaptureDepth++;
-                else if (reader.TokenType is JsonTokenType.EndObject or JsonTokenType.EndArray)
-                    state.CaptureDepth--;
+                switch (reader.TokenType)
+                {
+                    case JsonTokenType.StartObject or JsonTokenType.StartArray:
+                        state.CaptureDepth++;
+                        break;
+                    case JsonTokenType.EndObject or JsonTokenType.EndArray:
+                        state.CaptureDepth--;
+                        break;
+                }
 
                 CopyToken(reader, pipeWriter, readResult);
 
@@ -559,9 +541,8 @@ public static class JsonTranscoder
             switch (reader.TokenType)
             {
                 case JsonTokenType.PropertyName:
-                    state.PendingPropertyMatches =
-                        state.MatchedDepth == state.Depth
-                        && MatchesPropertyName(reader, pattern, state.MatchedDepth);
+                    state.PendingPropertyMatches = state.MatchedDepth == state.Depth
+                                                   && MatchesPropertyName(reader, pattern, state.MatchedDepth);
                     break;
 
                 case JsonTokenType.StartObject:
@@ -587,6 +568,7 @@ public static class JsonTranscoder
                     if (seg && state.MatchedDepth + 1 == pattern.Length)
                     {
                         CopyToken(reader, pipeWriter, readResult);
+                        
                         state.CaptureDepth = 1;
                         state.CaptureNeedsComma = false;
                         state.Depth--;
@@ -613,14 +595,13 @@ public static class JsonTranscoder
                 {
                     bool parentIsArray = state.Depth >= 0 && state.IsArray[state.Depth];
 
-                    bool seg =
-                        state.MatchedDepth == state.Depth
-                        && MatchesProjectionSegment(
-                            state.MatchedDepth,
-                            pattern,
-                            parentIsArray,
-                            state.PendingPropertyMatches
-                        );
+                    bool seg = state.MatchedDepth == state.Depth
+                               && MatchesProjectionSegment(
+                                   state.MatchedDepth,
+                                   pattern,
+                                   parentIsArray,
+                                   state.PendingPropertyMatches
+                               );
                     state.PendingPropertyMatches = false;
 
                     if (seg && state.MatchedDepth + 1 == pattern.Length)
@@ -649,6 +630,7 @@ public static class JsonTranscoder
             reader.TokenStartIndex,
             reader.BytesConsumed - reader.TokenStartIndex
         );
+        
         if (slice.IsSingleSegment)
             pipeWriter.Write(slice.FirstSpan);
         else
@@ -667,6 +649,7 @@ public static class JsonTranscoder
             return false;
 
         var seg = pattern[matchedDepth];
+        
         if (seg.Length == 0)
             return parentIsArray;
 

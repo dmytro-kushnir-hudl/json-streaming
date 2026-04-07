@@ -234,7 +234,7 @@ public class StreamingBenchmarks
     {
         var pipe = ToPipe(_json);
         var writer = PipeWriter.Create(Stream.Null);
-        await pipe.ProjectNdJsonDirectAsync(ProjectTitlesPath, writer);
+        await pipe.ProjectNdJsonVerbatimAsync(ProjectTitlesPath, writer);
         await writer.CompleteAsync();
     }
 
@@ -273,7 +273,7 @@ public class StreamingBenchmarks
     {
         var pipe = ToPipe(_json);
         var writer = PipeWriter.Create(Stream.Null);
-        await pipe.ProjectNdJsonDirectAsync(ProjectAllItemsPath, writer);
+        await pipe.ProjectNdJsonVerbatimAsync(ProjectAllItemsPath, writer);
         await writer.CompleteAsync();
     }
 
