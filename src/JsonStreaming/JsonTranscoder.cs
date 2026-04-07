@@ -340,15 +340,6 @@ public static class JsonTranscoder
                     if (task.IsCompletedSuccessfully)
                     {
                         // Fast path: callback completed synchronously.
-                        // Check if PipeWriter needs flushing (backpressure).
-                        if (writer is { CanGetUnflushedBytes: true, UnflushedBytes: >= FlushThreshold })
-                        {
-                            consumedUpTo = jsonReader.BytesConsumed;
-                            state.ReaderState = jsonReader.CurrentState;
-                            needsAsyncBreak = true;
-                            break;
-                        }
-
                         // Stay in the sync loop — process next token from same buffer.
                         hasToken = jsonReader.Read();
                         continue;

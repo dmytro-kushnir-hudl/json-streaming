@@ -59,15 +59,16 @@ public class StreamingBenchmarks
     public async Task Write_Verbatim()
     {
         var pipe = ToPipe(_json);
-        var output = PipeWriter.Create(Stream.Null);
-        await using var writer = new Utf8JsonWriter(output, SkipValidation);
+        await using var writer = new Utf8JsonWriter(Stream.Null, SkipValidation);
         writer.WriteStartArray();
         await pipe.ProjectItemsAsync(
             NdJsonPath.At("items").Each(),
-            output,
+            PipeWriter.Create(Stream.Null),
             (itemBytes, _) =>
             {
                 WriteRawSequence(writer, itemBytes);
+                if (writer.BytesPending >= 16_384)
+                    writer.Flush();
                 return ValueTask.CompletedTask;
             });
         writer.WriteEndArray();
@@ -79,12 +80,11 @@ public class StreamingBenchmarks
     public async Task Write_TransformJsonDocument()
     {
         var pipe = ToPipe(_json);
-        var output = PipeWriter.Create(Stream.Null);
-        await using var writer = new Utf8JsonWriter(output, SkipValidation);
+        await using var writer = new Utf8JsonWriter(Stream.Null, SkipValidation);
         writer.WriteStartArray();
         await pipe.ProjectItemsAsync(
             NdJsonPath.At("items").Each(),
-            output,
+            PipeWriter.Create(Stream.Null),
             (itemBytes, _) =>
             {
                 using var doc = JsonDocument.Parse(itemBytes);
@@ -93,6 +93,8 @@ public class StreamingBenchmarks
                 writer.WriteNumber("id"u8, root.GetProperty("id").GetInt32());
                 writer.WriteString("title"u8, root.GetProperty("title").GetString());
                 writer.WriteEndObject();
+                if (writer.BytesPending >= 16_384)
+                    writer.Flush();
                 return ValueTask.CompletedTask;
             });
         writer.WriteEndArray();
@@ -104,12 +106,11 @@ public class StreamingBenchmarks
     public async Task Write_TransformUtf8Reader()
     {
         var pipe = ToPipe(_json);
-        var output = PipeWriter.Create(Stream.Null);
-        await using var writer = new Utf8JsonWriter(output, SkipValidation);
+        await using var writer = new Utf8JsonWriter(Stream.Null, SkipValidation);
         writer.WriteStartArray();
         await pipe.ProjectItemsAsync(
             NdJsonPath.At("items").Each(),
-            output,
+            PipeWriter.Create(Stream.Null),
             (itemBytes, _) =>
             {
                 var reader = new Utf8JsonReader(itemBytes);
@@ -137,6 +138,8 @@ public class StreamingBenchmarks
                     }
                 }
                 writer.WriteEndObject();
+                if (writer.BytesPending >= 16_384)
+                    writer.Flush();
                 return ValueTask.CompletedTask;
             });
         writer.WriteEndArray();
@@ -148,12 +151,11 @@ public class StreamingBenchmarks
     public async Task Write_TypedDirectWrite()
     {
         var pipe = ToPipe(_json);
-        var output = PipeWriter.Create(Stream.Null);
-        await using var writer = new Utf8JsonWriter(output, SkipValidation);
+        await using var writer = new Utf8JsonWriter(Stream.Null, SkipValidation);
         writer.WriteStartArray();
         await pipe.ProjectItemsAsync(
             NdJsonPath.At("items").Each(),
-            output,
+            PipeWriter.Create(Stream.Null),
             (itemBytes, _) =>
             {
                 var reader = new Utf8JsonReader(itemBytes);
@@ -165,6 +167,8 @@ public class StreamingBenchmarks
                     writer.WriteString("title"u8, item.Title);
                     writer.WriteEndObject();
                 }
+                if (writer.BytesPending >= 16_384)
+                    writer.Flush();
                 return ValueTask.CompletedTask;
             });
         writer.WriteEndArray();
@@ -176,12 +180,11 @@ public class StreamingBenchmarks
     public async Task Write_TypedTransform()
     {
         var pipe = ToPipe(_json);
-        var output = PipeWriter.Create(Stream.Null);
-        await using var writer = new Utf8JsonWriter(output, SkipValidation);
+        await using var writer = new Utf8JsonWriter(Stream.Null, SkipValidation);
         writer.WriteStartArray();
         await pipe.ProjectItemsAsync(
             NdJsonPath.At("items").Each(),
-            output,
+            PipeWriter.Create(Stream.Null),
             (itemBytes, _) =>
             {
                 var reader = new Utf8JsonReader(itemBytes);
@@ -191,6 +194,8 @@ public class StreamingBenchmarks
                     var slim = new BenchItemSlim { Id = item.Id, Title = item.Title };
                     JsonSerializer.Serialize(writer, slim, BenchJsonContext.Default.BenchItemSlim);
                 }
+                if (writer.BytesPending >= 16_384)
+                    writer.Flush();
                 return ValueTask.CompletedTask;
             });
         writer.WriteEndArray();
@@ -207,7 +212,7 @@ public class StreamingBenchmarks
 
         await pipe.ProjectItemsAsync(
             NdJsonPath.At("items").Each(),
-            output,
+            PipeWriter.Create(Stream.Null),
             (itemBytes, _) =>
             {
                 WriteTitleNdjsonLine(itemBytes, writer, output);
@@ -245,7 +250,7 @@ public class StreamingBenchmarks
 
         await pipe.ProjectItemsAsync(
             NdJsonPath.At("items").Each(),
-            output,
+            PipeWriter.Create(Stream.Null),
             (itemBytes, pw) =>
             {
                 WriteSequence(pw, itemBytes);
