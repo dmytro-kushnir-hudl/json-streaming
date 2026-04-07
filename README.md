@@ -144,6 +144,16 @@ await JsonStreamReader.ProcessArrayAsync(pipe, "items", itemBytes =>
 }, ct);
 ```
 
+Or project matched values directly with `NdJsonPath`:
+
+```csharp
+await pipe.ProjectNdJsonDirectAsync(
+    NdJsonPath.At("products").Each().Key("title"),
+    output,
+    ct: ct
+);
+```
+
 With header/footer envelope for error signaling:
 ```
 {"__stream":"begin","streamId":"a1b2c3d4...","version":1}
@@ -164,7 +174,7 @@ public partial class Ctx : JsonSerializerContext;
 
 ## Sample App
 
-See [`samples/WebApiSample`](samples/WebApiSample/) — 11 endpoints from highest to lowest abstraction:
+See [`samples/WebApiSample`](samples/WebApiSample/) — 12 endpoints from highest to lowest abstraction:
 
 | Endpoint | Pattern |
 |----------|---------|
@@ -176,6 +186,7 @@ See [`samples/WebApiSample`](samples/WebApiSample/) — 11 endpoints from highes
 | `/level4/aggregate` | Zero-copy callback, aggregation |
 | `/ndjson/products` | NDJSON with typed transform |
 | `/ndjson/comments` | NDJSON passthrough |
+| `/ndjson/product-titles` | NDJSON via `NdJsonPath` projection |
 | `/deep/select-many` | `Each()` across nested pages |
 | `/deep/nested` | Deep JsonPath navigation |
 | `/multi-source` | Sequential pages, shared writer |

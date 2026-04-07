@@ -440,6 +440,31 @@ app.MapGet(
     }
 );
 
+// NDJSON projection — extract one nested value per line with NdJsonPath.
+// No header/footer envelope here: this is the raw projection primitive.
+app.MapGet(
+    "/ndjson/product-titles",
+    async (HttpContext ctx, IHttpClientFactory httpFactory, CancellationToken ct, int limit = 100) =>
+    {
+        ctx.Response.ContentType = "application/x-ndjson";
+        ctx.Features.Get<IHttpResponseBodyFeature>()?.DisableBuffering();
+
+        await using var upstream = await ctx.StreamFrom(
+            httpFactory,
+            $"https://dummyjson.com/products?limit={limit}",
+            ct
+        );
+
+        await upstream.Pipe.ProjectNdJsonDirectAsync(
+            NdJsonPath.At("products").Each().Key("title"),
+            ctx.Response.BodyWriter,
+            ct: ct
+        );
+
+        await ctx.Response.BodyWriter.FlushAsync(ct);
+    }
+);
+
 // ════════════════════════════════════════════════════════════════════════
 // DEEP MATCHING — JsonPath with Each() for select-many across nested arrays.
 //

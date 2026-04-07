@@ -23,6 +23,11 @@ public class StreamingBenchmarks
 
     private byte[] _json = [];
 
+    private const long PipeFlushThreshold = 16_384;
+
+    private static readonly NdJsonPath ProjectTitlesPath = NdJsonPath.At("items").Each().Key("title");
+    private static readonly NdJsonPath ProjectAllItemsPath = NdJsonPath.At("items").Each();
+
     [GlobalSetup]
     public void Setup()
     {
@@ -195,6 +200,83 @@ public class StreamingBenchmarks
         return count;
     }
 
+    // ── 10. NDJSON: old callback approach vs transcoder ───────────────────
+
+    [Benchmark(Description = "NDJSON: old projection titles (ProcessArray + Utf8JsonReader)")]
+    public async Task Ndjson_ProjectTitles_Manual()
+    {
+        var pipe = ToPipe(_json);
+        var output = PipeWriter.Create(Stream.Null);
+        using var writer = new Utf8JsonWriter(output, SkipValidation);
+
+        await JsonStreamReader.ProcessArrayAsync(
+            pipe,
+            "items",
+            itemBytes => WriteTitleNdjsonLine(itemBytes, writer, output)
+        );
+
+        writer.Flush();
+        await output.FlushAsync();
+        await output.CompleteAsync();
+    }
+
+    [Benchmark(Description = "NDJSON: transcoder projection titles (Utf8JsonWriter)")]
+    public async Task Ndjson_ProjectTitles_Transcoder()
+    {
+        var pipe = ToPipe(_json);
+        var writer = PipeWriter.Create(Stream.Null);
+        await pipe.ProjectNdJsonAsync(ProjectTitlesPath, writer);
+        await writer.CompleteAsync();
+    }
+
+    [Benchmark(Description = "NDJSON: transcoder projection titles (direct copy)")]
+    public async Task Ndjson_ProjectTitles_TranscoderDirect()
+    {
+        var pipe = ToPipe(_json);
+        var writer = PipeWriter.Create(Stream.Null);
+        await pipe.ProjectNdJsonDirectAsync(ProjectTitlesPath, writer);
+        await writer.CompleteAsync();
+    }
+
+    [Benchmark(Description = "NDJSON: old passthrough all items (ProcessArray callback)")]
+    public async Task Ndjson_ProjectAllItems_Manual()
+    {
+        var pipe = ToPipe(_json);
+        var output = PipeWriter.Create(Stream.Null);
+
+        await JsonStreamReader.ProcessArrayAsync(
+            pipe,
+            "items",
+            itemBytes =>
+            {
+                WriteSequence(output, itemBytes);
+                output.Write("\n"u8);
+                FlushPipeWriterIfNeeded(output);
+            }
+        );
+
+        await output.FlushAsync();
+        await output.CompleteAsync();
+    }
+
+    [Benchmark(Description = "NDJSON: transcoder all items (Utf8JsonWriter)")]
+    public async Task Ndjson_ProjectAllItems_Transcoder()
+    {
+        var pipe = ToPipe(_json);
+        var writer = PipeWriter.Create(Stream.Null);
+        await pipe.ProjectNdJsonAsync(ProjectAllItemsPath, writer);
+        await writer.CompleteAsync();
+    }
+
+    [Benchmark(Description = "NDJSON: transcoder all items (direct copy)")]
+    public async Task Ndjson_ProjectAllItems_TranscoderDirect()
+    {
+        var pipe = ToPipe(_json);
+        var writer = PipeWriter.Create(Stream.Null);
+        await pipe.ProjectNdJsonDirectAsync(ProjectAllItemsPath, writer);
+        await writer.CompleteAsync();
+    }
+
     // ── Helpers ─────────────────────────────────────────────────────────────
 
     private static readonly JsonWriterOptions SkipValidation = new() { SkipValidation = true };
@@ -207,6 +289,61 @@ public class StreamingBenchmarks
 
     private static PipeReader ToPipe(byte[] data) =>
         PipeReader.Create(new MemoryStream(data), new StreamPipeReaderOptions(bufferSize: 8192));
+
+    private static void WriteTitleNdjsonLine(
+        ReadOnlySequence<byte> itemBytes,
+        Utf8JsonWriter writer,
+        PipeWriter output
+    )
+    {
+        var reader = new Utf8JsonReader(itemBytes);
+
+        while (reader.Read())
+        {
+            if (reader.TokenType != JsonTokenType.PropertyName)
+                continue;
+
+            bool isTitle = reader.ValueTextEquals("title"u8);
+            reader.Read();
+
+            if (!isTitle)
+            {
+                reader.Skip();
+                continue;
+            }
+
+            if (!reader.HasValueSequence && !reader.ValueIsEscaped)
+                writer.WriteStringValue(reader.ValueSpan);
+            else
+                writer.WriteStringValue(reader.GetString());
+
+            writer.Flush();
+            output.Write("\n"u8);
+            writer.Reset();
+            FlushPipeWriterIfNeeded(output);
+            return;
+        }
+    }
+
+    private static void WriteSequence(PipeWriter output, ReadOnlySequence<byte> sequence)
+    {
+        if (sequence.IsSingleSegment)
+        {
+            output.Write(sequence.FirstSpan);
+            return;
+        }
+
+        foreach (var segment in sequence)
+            output.Write(segment.Span);
+    }
+
+    private static void FlushPipeWriterIfNeeded(PipeWriter output)
+    {
+        if (
+            output is { CanGetUnflushedBytes: true, UnflushedBytes: >= PipeFlushThreshold }
+        )
+            output.FlushAsync().GetAwaiter().GetResult();
+    }
 
     private static byte[] MakeJson(int count)
     {
