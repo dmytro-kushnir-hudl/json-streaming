@@ -24,7 +24,8 @@ namespace JsonStreaming;
 /// </summary>
 public static class JsonStreamReader
 {
-    private const string IncompleteJsonMessage = "Incomplete or malformed JSON while streaming array items.";
+    private const string IncompleteJsonMessage =
+        "Incomplete or malformed JSON while streaming array items.";
 
     // ── Callback API (zero-copy) ───────────────────────────────────────────
 
@@ -153,14 +154,7 @@ public static class JsonStreamReader
         Utf8JsonWriter writer,
         WriteItemDelegate writeItem,
         CancellationToken ct = default
-    ) =>
-        WriteArrayAsync(
-            pipeReader,
-            JsonPathNavigator.ParseDotPath(path),
-            writer,
-            writeItem,
-            ct
-        );
+    ) => WriteArrayAsync(pipeReader, JsonPathNavigator.ParseDotPath(path), writer, writeItem, ct);
 
     /// <summary>
     /// Convenience overload: dot-separated path string + transform + explicit options.
@@ -298,10 +292,7 @@ public static class JsonStreamReader
                 if (reader.TrySkip())
                 {
                     long itemLength = reader.BytesConsumed - itemStart;
-                    var itemSlice = buffer.Slice(
-                        buffer.GetPosition(itemStart),
-                        itemLength
-                    );
+                    var itemSlice = buffer.Slice(buffer.GetPosition(itemStart), itemLength);
 
                     long bytesBeforeWrite = writer.BytesCommitted + writer.BytesPending;
                     writeItem(itemSlice, writer);
@@ -332,7 +323,7 @@ public static class JsonStreamReader
 
             if (needsFlush)
             {
-                writer.Flush();
+                await writer.FlushAsync(ct);
                 lastFlushedAt = writer.BytesCommitted;
 
                 if (asyncFlush is not null)
@@ -547,8 +538,7 @@ public static class JsonStreamReader
                                         count++;
 
                                     // Check flush — checkpoint and break if needed
-                                    long totalWritten =
-                                        writer.BytesCommitted + writer.BytesPending;
+                                    long totalWritten = writer.BytesCommitted + writer.BytesPending;
                                     if (
                                         flushThreshold > 0
                                         && (totalWritten - lastFlushedAt) >= flushThreshold
@@ -564,10 +554,7 @@ public static class JsonStreamReader
                                 {
                                     // Incomplete item — need more data
                                     jsonState = reader.CurrentState;
-                                    pipeReader.AdvanceTo(
-                                        buffer.GetPosition(itemStart),
-                                        buffer.End
-                                    );
+                                    pipeReader.AdvanceTo(buffer.GetPosition(itemStart), buffer.End);
                                     goto afterInnerLoop;
                                 }
                             }
