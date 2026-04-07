@@ -331,10 +331,12 @@ public static class JsonTranscoder
             state.ReaderState
         );
 
-        while (reader.Read())
+        bool hasToken = reader.Read();
+
+        while (hasToken)
         {
-            // we are in the relevant section - write
-            if (state.CaptureDepth > 0)
+            // ── PHASE 1: CAPTURE ───────────────────────────────────────────────
+            if (state.IsCapturing)
             {
                 if (reader.TokenType is JsonTokenType.StartObject or JsonTokenType.StartArray)
                     state.CaptureDepth++;
@@ -345,14 +347,19 @@ public static class JsonTranscoder
 
                 if (state.CaptureDepth == 0)
                 {
+                    state.IsCapturing = false;
                     jwriter.Flush();
                     pipeWriter.Write("\n"u8);
                     jwriter.Reset();
                 }
+
+                hasToken = reader.Read();
                 continue;
             }
 
-            // test next token
+            // ── PHASE 2: SEARCH ────────────────────────────────────────────────
+            bool startCaptureNow = false;
+
             switch (reader.TokenType)
             {
                 case JsonTokenType.PropertyName:
@@ -373,7 +380,7 @@ public static class JsonTranscoder
                                    parentIsArray,
                                    state.PendingPropertyMatches
                                );
-                    
+
                     state.PendingPropertyMatches = false;
 
                     state.Depth++;
@@ -382,12 +389,7 @@ public static class JsonTranscoder
 
                     if (seg && state.MatchedDepth + 1 == pattern.Length)
                     {
-                        if (isArray)
-                            jwriter.WriteStartArray();
-                        else
-                            jwriter.WriteStartObject();
-                        
-                        state.CaptureDepth = 1;
+                        startCaptureNow = true;
                         state.Depth--;
                         state.MatchedDepth = state.MatchedDepthStack[state.Depth + 1];
                     }
@@ -430,6 +432,18 @@ public static class JsonTranscoder
                     }
                     break;
                 }
+            }
+
+            // ── PHASE TRANSITION ───────────────────────────────────────────────
+            if (startCaptureNow)
+            {
+                state.IsCapturing = true;
+                state.CaptureDepth = 0;
+                // Do not advance — capture phase will process the current StartObject/StartArray
+            }
+            else
+            {
+                hasToken = reader.Read();
             }
         }
 
@@ -505,9 +519,12 @@ public static class JsonTranscoder
             state.ReaderState
         );
 
-        while (reader.Read())
+        bool hasToken = reader.Read();
+
+        while (hasToken)
         {
-            if (state.CaptureDepth > 0)
+            // ── PHASE 1: CAPTURE ───────────────────────────────────────────────
+            if (state.IsCapturing)
             {
                 if (state.CaptureNeedsComma && reader.TokenType is not JsonTokenType.EndObject and not JsonTokenType.EndArray)
                     pipeWriter.Write(","u8);
@@ -532,12 +549,17 @@ public static class JsonTranscoder
 
                 if (state.CaptureDepth == 0)
                 {
+                    state.IsCapturing = false;
                     pipeWriter.Write("\n"u8);
                     state.CaptureNeedsComma = false;
                 }
 
+                hasToken = reader.Read();
                 continue;
             }
+
+            // ── PHASE 2: SEARCH ────────────────────────────────────────────────
+            bool startCaptureNow = false;
 
             switch (reader.TokenType)
             {
@@ -568,10 +590,7 @@ public static class JsonTranscoder
 
                     if (seg && state.MatchedDepth + 1 == pattern.Length)
                     {
-                        CopyToken(reader, pipeWriter, readResult);
-                        
-                        state.CaptureDepth = 1;
-                        state.CaptureNeedsComma = false;
+                        startCaptureNow = true;
                         state.Depth--;
                         state.MatchedDepth = state.MatchedDepthStack[state.Depth + 1];
                     }
@@ -612,6 +631,19 @@ public static class JsonTranscoder
                     }
                     break;
                 }
+            }
+
+            // ── PHASE TRANSITION ───────────────────────────────────────────────
+            if (startCaptureNow)
+            {
+                state.IsCapturing = true;
+                state.CaptureDepth = 0;
+                state.CaptureNeedsComma = false;
+                // Do not advance — capture phase will process the current StartObject/StartArray
+            }
+            else
+            {
+                hasToken = reader.Read();
             }
         }
 
@@ -711,6 +743,7 @@ public static class JsonTranscoder
         public readonly bool[] IsArray = new bool[64];
         public readonly int[] MatchedDepthStack = new int[64];
         public bool PendingPropertyMatches;
+        public bool IsCapturing;
         public int CaptureDepth;
         public bool CaptureNeedsComma;
         public JsonReaderState ReaderState;
