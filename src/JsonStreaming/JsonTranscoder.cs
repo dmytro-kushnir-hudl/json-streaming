@@ -219,6 +219,185 @@ public static class JsonTranscoder
         framer.EndDocument(writer);
     }
 
+    // ── Item projection (raw-bytes callback) ───────────────────────────────
+
+    /// <summary>
+    /// Reads JSON from <paramref name="reader"/>, navigates to each value matching
+    /// <paramref name="path"/>, and invokes <paramref name="processItem"/> with the
+    /// raw bytes of each matched value. The callback receives the item bytes as a
+    /// <see cref="ReadOnlySequence{T}"/> (valid only during the call) and the
+    /// <paramref name="writer"/> for output.
+    /// </summary>
+    public static async Task ProjectItemsAsync(
+        this PipeReader reader,
+        NdJsonPath path,
+        PipeWriter writer,
+        Func<ReadOnlySequence<byte>, PipeWriter, ValueTask> processItem,
+        JsonReaderOptions readerOptions = default,
+        CancellationToken ct = default)
+    {
+        var state = new ProjectionState { ReaderState = new JsonReaderState(readerOptions) };
+        ct.ThrowIfCancellationRequested();
+
+        byte[]? accumulator = null;
+        int accumulatedLength = 0;
+        long captureStartIndex = -1;
+
+        try
+        {
+            while (true)
+            {
+                var result = await reader.ReadAsync(ct);
+                var buffer = result.Buffer;
+
+                if (result.IsCanceled)
+                    throw new OperationCanceledException(ct);
+
+                var jsonReader = new Utf8JsonReader(
+                    buffer, result.IsCompleted, state.ReaderState);
+
+                long consumedUpTo = 0;
+                bool itemFound = false;
+                ReadOnlySequence<byte> itemSlice = default;
+
+                bool hasToken = jsonReader.Read();
+                while (hasToken)
+                {
+                    byte[]? rentedName = null;
+                    ParserDirective directive;
+                    try
+                    {
+                        ReadOnlySpan<byte> name = jsonReader.TokenType == JsonTokenType.PropertyName
+                                ? GetPropertyName(ref jsonReader, ref rentedName)
+                                : default;
+                        directive = state.Advance(jsonReader.TokenType, path.Segments, name);
+                    }
+                    finally
+                    {
+                        if (rentedName != null)
+                            ArrayPool<byte>.Shared.Return(rentedName);
+                    }
+
+                    switch (directive)
+                    {
+                        case ParserDirective.Skip:
+                            break;
+
+                        case ParserDirective.YieldValue:
+                        {
+                            long start = jsonReader.TokenStartIndex;
+                            long length = jsonReader.BytesConsumed - start;
+                            itemSlice = buffer.Slice(buffer.GetPosition(start), length);
+                            consumedUpTo = jsonReader.BytesConsumed;
+                            state.ReaderState = jsonReader.CurrentState;
+                            itemFound = true;
+                            goto exitSyncLoop;
+                        }
+
+                        case ParserDirective.BeginCapture:
+                            captureStartIndex = jsonReader.TokenStartIndex;
+                            continue; // don't advance reader
+
+                        case ParserDirective.Capture:
+                            break;
+
+                        case ParserDirective.EndCapture:
+                        {
+                            long endPos = jsonReader.BytesConsumed;
+
+                            if (accumulatedLength > 0)
+                            {
+                                // Multi-chunk item — append final portion
+                                int finalLen = (int)(endPos - captureStartIndex);
+                                EnsureAccumulator(ref accumulator, accumulatedLength + finalLen);
+                                buffer.Slice(buffer.GetPosition(captureStartIndex), finalLen)
+                                      .CopyTo(accumulator.AsSpan(accumulatedLength));
+                                accumulatedLength += finalLen;
+
+                                itemSlice = new ReadOnlySequence<byte>(
+                                    accumulator!, 0, accumulatedLength);
+                            }
+                            else
+                            {
+                                // Single-chunk item — zero-copy slice
+                                itemSlice = buffer.Slice(
+                                    buffer.GetPosition(captureStartIndex),
+                                    endPos - captureStartIndex);
+                            }
+
+                            captureStartIndex = -1;
+                            consumedUpTo = endPos;
+                            state.ReaderState = jsonReader.CurrentState;
+                            itemFound = true;
+                            goto exitSyncLoop;
+                        }
+                    }
+
+                    hasToken = jsonReader.Read();
+                }
+
+                // End of tokens in this chunk
+                if (captureStartIndex >= 0)
+                {
+                    // Capture in progress — accumulate bytes and advance
+                    int captureLen = (int)(jsonReader.BytesConsumed - captureStartIndex);
+                    if (captureLen > 0)
+                    {
+                        EnsureAccumulator(ref accumulator, accumulatedLength + captureLen);
+                        buffer.Slice(buffer.GetPosition(captureStartIndex), captureLen)
+                              .CopyTo(accumulator.AsSpan(accumulatedLength));
+                        accumulatedLength += captureLen;
+                    }
+                    captureStartIndex = 0;
+                }
+
+                state.ReaderState = jsonReader.CurrentState;
+                consumedUpTo = jsonReader.BytesConsumed;
+                reader.AdvanceTo(buffer.GetPosition(consumedUpTo), buffer.End);
+
+                if (result.IsCompleted)
+                    break;
+                continue;
+
+            exitSyncLoop:
+                if (itemFound)
+                {
+                    // Call processItem BEFORE AdvanceTo — the itemSlice may
+                    // reference the buffer which AdvanceTo would release.
+                    await processItem(itemSlice, writer);
+                    accumulatedLength = 0;
+                }
+
+                reader.AdvanceTo(buffer.GetPosition(consumedUpTo), buffer.End);
+
+                if (itemFound && writer is { CanGetUnflushedBytes: true, UnflushedBytes: >= FlushThreshold })
+                    await writer.FlushAsync(ct);
+
+                // Don't break here — there may be more items in the remaining buffer.
+                // The next ReadAsync will return remaining data even if IsCompleted.
+            }
+        }
+        finally
+        {
+            if (accumulator != null)
+                ArrayPool<byte>.Shared.Return(accumulator);
+        }
+    }
+
+    private static void EnsureAccumulator(ref byte[]? buffer, int needed)
+    {
+        if (buffer == null || buffer.Length < needed)
+        {
+            var old = buffer;
+            buffer = ArrayPool<byte>.Shared.Rent(Math.Max(needed, 4096));
+            if (old != null)
+            {
+                old.AsSpan().CopyTo(buffer);
+                ArrayPool<byte>.Shared.Return(old);
+            }
+        }
+    }
+
     // ── WriteFormatted ────────────────────────────────────────────────────────
 
     private static long WriteFormatted(
