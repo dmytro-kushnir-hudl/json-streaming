@@ -473,9 +473,10 @@ app.MapGet(
             ct
         );
 
-        await upstream.Pipe.ProjectNdJsonVerbatimAsync(
-            JsonPath.At("products").Each().Key("title"),
+        await upstream.Pipe.TransformItemsAsync(
             ctx.Response.BodyWriter,
+            JsonPath.At("products").Each().Key("title"),
+            (bytes, w) => w.Write(bytes),
             ct: ct
         );
 

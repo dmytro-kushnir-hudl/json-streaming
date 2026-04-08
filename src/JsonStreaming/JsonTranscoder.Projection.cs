@@ -9,29 +9,64 @@ public delegate void Transformer(ReadOnlySequence<byte> itemBytes, Writers outpu
 public static partial class JsonTranscoder
 {
     /// <summary>
-    /// Reads JSON from <paramref name="reader"/>, navigates to each value matching
-    /// <paramref name="path"/>, and invokes <paramref name="processItem"/> with the
-    /// raw bytes of each matched value. The callback receives the item bytes as a
-    /// <see cref="ReadOnlySequence{T}"/> (valid only during the call) and the
-    /// <paramref name="writer"/> for output.
+    /// Reads JSON from <paramref name="input"/>, navigates to each value matching
+    /// <paramref name="selector"/>, and invokes <paramref name="transformer"/> with the
+    /// raw bytes of each matched value. Items are written as newline-delimited JSON.
     /// </summary>
-    public static async Task TransformItemsAsync(
+    public static Task TransformItemsAsync(
         this PipeReader input,
         PipeWriter output,
         JsonPath selector,
         Transformer transformer,
         JsonReaderOptions options = default,
         CancellationToken ct = default)
+        => TransformItemsCoreAsync(input, output, selector, transformer, new NdJsonFramer(), options, ct);
+
+    /// <summary>
+    /// Like <see cref="TransformItemsAsync"/> but wraps the output in a JSON array
+    /// (<c>[item,item,…]</c>).
+    /// </summary>
+    public static Task TransformItemsAsArrayAsync(
+        this PipeReader input,
+        PipeWriter output,
+        JsonPath selector,
+        Transformer transformer,
+        JsonReaderOptions options = default,
+        CancellationToken ct = default)
+        => TransformItemsCoreAsync(input, output, selector, transformer, new JsonArrayFramer(), options, ct);
+
+    /// <summary>
+    /// Like <see cref="TransformItemsAsync"/> but wraps the output in a
+    /// <c>{"results":[…],"count":N}</c> envelope.
+    /// </summary>
+    public static Task TransformItemsWithEnvelopeAsync(
+        this PipeReader input,
+        PipeWriter output,
+        JsonPath selector,
+        Transformer transformer,
+        JsonReaderOptions options = default,
+        CancellationToken ct = default)
+        => TransformItemsCoreAsync(input, output, selector, transformer, new JsonEnvelopeFramer(), options, ct);
+
+    private static async Task TransformItemsCoreAsync<TFramer>(
+        PipeReader input,
+        PipeWriter output,
+        JsonPath selector,
+        Transformer transformer,
+        TFramer framer,
+        JsonReaderOptions options,
+        CancellationToken ct)
+        where TFramer : struct, IItemFramer
     {
         ArgumentNullException.ThrowIfNull(input);
         ArgumentNullException.ThrowIfNull(output);
         ArgumentNullException.ThrowIfNull(selector);
 
         var state = new FilterStateMachine(new JsonReaderState(options));
-        var framer = new NdJsonFramer();
         ct.ThrowIfCancellationRequested();
         await using var utf8Json = new Utf8JsonWriter(output);
-        framer.BeginDocument(output);
+        var writers = new Writers(output, utf8Json);
+        framer.BeginDocument(writers);
 
         while (true)
         {
@@ -44,7 +79,7 @@ public static partial class JsonTranscoder
                 if (result.IsCanceled)
                     throw new OperationCanceledException(ct);
 
-                var bytesConsumed = WriteTransformation(state, result, output, selector, transformer, ref framer, utf8Json);
+                var bytesConsumed = WriteTransformation(state, result, output, selector, transformer, ref framer, writers);
                 consumed = buffer.GetPosition(bytesConsumed);
 
                 if (result.IsCompleted || output is { CanGetUnflushedBytes: true, UnflushedBytes: >= FlushThreshold })
@@ -61,16 +96,17 @@ public static partial class JsonTranscoder
             }
         }
 
-        framer.EndDocument(output);
+        framer.EndDocument(writers);
     }
-    
+
     private static long WriteTransformation<TFramer>(
         FilterStateMachine state,
         ReadResult readResult,
         PipeWriter output,
         JsonPath pattern,
         Transformer transformer,
-        ref TFramer framer, Utf8JsonWriter utf8Json)
+        ref TFramer framer,
+        Writers writers)
         where TFramer : struct, IItemFramer
     {
         // When a cross-buffer capture is in progress the pipe has been anchored at the
@@ -103,16 +139,16 @@ public static partial class JsonTranscoder
                 case ParserDirective.YieldValue:
                 {
                     var transformerInput = state.CalculateValueSlice(readResult.Buffer);
-                    transformer(transformerInput, new Writers(output, utf8Json));
-                    framer.FinishItem(output);
+                    framer.FinishItem(writers);
+                    transformer(transformerInput, writers);
                     break;
                 }
 
                 case ParserDirective.EndCapture:
                 {
                     var transformerInput = state.CalculateValueSlice(readResult.Buffer);
-                    transformer(transformerInput, new Writers(output, utf8Json));
-                    framer.FinishItem(output);
+                    framer.FinishItem(writers);
+                    transformer(transformerInput, writers);
                     break;
                 }
             }
@@ -162,24 +198,6 @@ public static partial class JsonTranscoder
         /// </summary>
         public ReadOnlySequence<byte> CalculateValueSlice(ReadOnlySequence<byte> buffer)
             => buffer.Slice(_valueStart, _valueEnd - _valueStart);
-
-        /// <summary>
-        /// Finalises one read segment: saves <paramref name="readerState"/>, then returns the
-        /// position callers should pass to <c>PipeReader.AdvanceTo</c>.  When a capture is in
-        /// progress the method anchors at <c>_captureStartOffset</c> so those bytes are
-        /// re-presented in the next read; <see cref="UnconsumedParsedBytes"/> is set accordingly
-        /// so the next segment skips re-parsing them.
-        /// </summary>
-        /// <summary>
-        /// Lightweight variant for callers that render tokens on-the-fly and always consume
-        /// everything they parse (e.g. <c>WriteTokensOnTheFly</c>).  Saves reader state and
-        /// returns the absolute consumed position; no pipe-framing anchor logic.
-        /// </summary>
-        public long CompleteSegmentFullConsume(JsonReaderState readerState, long readerBytesConsumed)
-        {
-            ReaderState = readerState;
-            return readerBytesConsumed; // UnconsumedParsedBytes is always 0 for this path
-        }
 
         /// <summary>
         /// Full variant for byte-range capture callers.  Saves reader state, then returns the

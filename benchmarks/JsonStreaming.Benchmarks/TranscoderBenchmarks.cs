@@ -83,7 +83,7 @@ public class TranscoderBenchmarks
     {
         var pipe = ToPipe(_minified);
         var writer = PipeWriter.Create(Stream.Null);
-        await pipe.ProjectNdJsonAsync(ProjectTitles, writer);
+        await pipe.TransformItemsAsync(writer, ProjectTitles, (bytes, w) => w.Write(bytes));
         await writer.CompleteAsync();
     }
 
@@ -92,7 +92,7 @@ public class TranscoderBenchmarks
     {
         var pipe = ToPipe(_minified);
         var writer = PipeWriter.Create(Stream.Null);
-        await pipe.ProjectNdJsonAsync(ProjectAllItems, writer);
+        await pipe.TransformItemsAsync(writer, ProjectAllItems, (bytes, w) => w.Write(bytes));
         await writer.CompleteAsync();
     }
 

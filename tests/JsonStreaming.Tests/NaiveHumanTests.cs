@@ -81,7 +81,7 @@ public class NaiveHumanTests
             inputPipe.ProxyFormattedJsonAsync(outputPipe, default, ct));
     }
 
-    // ── ProjectNdJsonAsync ────────────────────────────────────────────────────
+    // ── TransformItemsAsync ───────────────────────────────────────────────────
 
     // language=JSON
     const string OrderJson = """
@@ -108,7 +108,7 @@ public class NaiveHumanTests
         var pipe = PipeReader.Create(new MemoryStream(bytes));
         var output = new MemoryStream();
         var writer = PipeWriter.Create(output);
-        pipe.ProjectNdJsonAsync(path, writer).GetAwaiter().GetResult();
+        pipe.TransformItemsAsync(writer, path, (bytes, w) => w.Write(bytes)).GetAwaiter().GetResult();
         writer.CompleteAsync().GetAwaiter().GetResult();
         return Encoding.UTF8.GetString(output.ToArray())
             .Split('\n', StringSplitOptions.RemoveEmptyEntries);

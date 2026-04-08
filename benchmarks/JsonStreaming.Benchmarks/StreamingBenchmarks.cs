@@ -84,6 +84,7 @@ public class StreamingBenchmarks
                 writers.Json.WriteString("title"u8, root.GetProperty("title").GetString());
                 writers.Json.WriteEndObject();
                 writers.Json.Flush();
+                writers.Json.Reset();
             });
     }
 
@@ -182,6 +183,7 @@ public class StreamingBenchmarks
                     writers.Json.WriteString("title"u8, item.Title);
                     writers.Json.WriteEndObject();
                     writers.Json.Flush();
+                    writers.Json.Reset();
                 }
             });
     }
@@ -227,24 +229,6 @@ public class StreamingBenchmarks
 
     }
 
-    [Benchmark(Description = "NDJSON: transcoder projection titles (Utf8JsonWriter)")]
-    public async Task Ndjson_ProjectTitles_Transcoder()
-    {
-        var pipe = ToPipe(_json);
-        var writer = PipeWriter.Create(Stream.Null);
-        await pipe.ProjectNdJsonAsync((JsonPath)JsonPath.At("items").Each().Key("title"), writer);
-        await writer.CompleteAsync();
-    }
-
-    [Benchmark(Description = "NDJSON: transcoder projection titles (direct copy)")]
-    public async Task Ndjson_ProjectTitles_TranscoderDirect()
-    {
-        var pipe = ToPipe(_json);
-        var writer = PipeWriter.Create(Stream.Null);
-        await pipe.ProjectNdJsonVerbatimAsync((JsonPath)JsonPath.At("items").Each().Key("title"), writer);
-        await writer.CompleteAsync();
-    }
-
     [Benchmark(Description = "NDJSON: TransformItemsAsync all items")]
     public async Task Ndjson_ProjectAllItems_Manual()
     {
@@ -262,24 +246,6 @@ public class StreamingBenchmarks
 
         await output.FlushAsync();
         await output.CompleteAsync();
-    }
-
-    [Benchmark(Description = "NDJSON: transcoder all items (Utf8JsonWriter)")]
-    public async Task Ndjson_ProjectAllItems_Transcoder()
-    {
-        var pipe = ToPipe(_json);
-        var writer = PipeWriter.Create(Stream.Null);
-        await pipe.ProjectNdJsonAsync((JsonPath)JsonPath.At("items").Each(), writer);
-        await writer.CompleteAsync();
-    }
-
-    [Benchmark(Description = "NDJSON: transcoder all items (direct copy)")]
-    public async Task Ndjson_ProjectAllItems_TranscoderDirect()
-    {
-        var pipe = ToPipe(_json);
-        var writer = PipeWriter.Create(Stream.Null);
-        await pipe.ProjectNdJsonVerbatimAsync((JsonPath)JsonPath.At("items").Each(), writer);
-        await writer.CompleteAsync();
     }
 
     // ── Helpers ─────────────────────────────────────────────────────────────
