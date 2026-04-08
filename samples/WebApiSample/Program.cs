@@ -11,50 +11,88 @@ builder.Services.AddHttpClient();
 var app = builder.Build();
 
 // ════════════════════════════════════════════════════════════════════════
-// LEVEL 1 — Envelope helpers using ProjectItemsAsync
+// FRAMERS — TransformItemsAsArrayAsync / TransformItemsWithEnvelopeAsync
 //
-// Build the JSON envelope manually, then use ProjectItemsAsync to write
-// each matched item as a raw value into the array.
+// Built-in framer overloads for common output shapes. No manual envelope
+// boilerplate — the framer handles BeginDocument / FinishItem / EndDocument.
+// ════════════════════════════════════════════════════════════════════════
+
+// Plain JSON array — items[*] → [item, item, ...]
+app.MapGet(
+    "/framer/array",
+    async (HttpContext ctx, IHttpClientFactory httpFactory, CancellationToken ct, int limit = 10) =>
+    {
+        await using var upstream = await ctx.StreamFrom(
+            httpFactory,
+            $"https://dummyjson.com/products?limit={limit}",
+            ct
+        );
+
+        await upstream.Pipe.TransformItemsAsArrayAsync(
+            ctx.Response.BodyWriter,
+            JsonPath.At("products").Each(),
+            (bytes, w) => w.Write(bytes),
+            ct: ct
+        );
+
+        await ctx.Response.BodyWriter.FlushAsync(ct);
+    }
+);
+
+// Envelope — items[*] → {"results":[...],"count":N}
+app.MapGet(
+    "/framer/envelope",
+    async (HttpContext ctx, IHttpClientFactory httpFactory, CancellationToken ct, int limit = 10) =>
+    {
+        await using var upstream = await ctx.StreamFrom(
+            httpFactory,
+            $"https://dummyjson.com/products?limit={limit}",
+            ct
+        );
+
+        await upstream.Pipe.TransformItemsWithEnvelopeAsync(
+            ctx.Response.BodyWriter,
+            JsonPath.At("products").Each(),
+            (bytes, w) => w.Write(bytes),
+            ct: ct
+        );
+
+        await ctx.Response.BodyWriter.FlushAsync(ct);
+    }
+);
+
+// ════════════════════════════════════════════════════════════════════════
+// LEVEL 1 — TransformItemsWithEnvelopeAsync
+//
+// Built-in {"results":[...],"count":N} envelope, no boilerplate.
+// CancellationToken flows through: HttpClient.SendAsync → PipeReader.ReadAsync → TransformItemsAsync.
+// If the client disconnects, the entire pipeline cancels.
 // ════════════════════════════════════════════════════════════════════════
 
 // Passthrough — items flow verbatim from upstream to client.
-// CancellationToken is injected by ASP.NET minimal API from ctx.RequestAborted.
-// It flows through: HttpClient.SendAsync → PipeReader.ReadAsync → ProjectItemsAsync.
-// If the client disconnects, the entire pipeline cancels.
 app.MapGet(
     "/level1/passthrough",
     async (HttpContext ctx, IHttpClientFactory httpFactory, CancellationToken ct) =>
     {
         await using var upstream = await ctx.StreamFrom(httpFactory, "https://jsonplaceholder.typicode.com/comments", ct);
 
-        var output = ctx.Response.BodyWriter;
-        await using var writer = new Utf8JsonWriter(output);
-
-        writer.WriteStartObject();
-        writer.WriteStartArray("comments"u8);
-
-        int count = 0;
-        await upstream.Pipe.TransformItemsAsync(
-            output,
-            JsonPath.Root,
-            (itemBytes, pw) =>
+        await upstream.Pipe.TransformItemsWithEnvelopeAsync(
+            ctx.Response.BodyWriter,
+            JsonPath.Each(),
+            (bytes, w) =>
             {
-                writer.WriteRawValue(itemBytes, skipInputValidation: true);
-                count++;
-
+                w.Json.WriteRawValue(bytes, skipInputValidation: true);
+                w.Json.Flush();
+                w.Json.Reset();
             },
             ct: ct
         );
 
-        writer.WriteEndArray();
-        writer.WriteNumber("count"u8, count);
-        writer.WriteEndObject();
-        await writer.FlushAsync(ct);
-        await output.FlushAsync(ct);
+        await ctx.Response.BodyWriter.FlushAsync(ct);
     }
 );
 
-// Typed transform — CancellationToken flows the same way.
+// Typed transform — deserialize each item, reshape, serialize via w.Json.
 app.MapGet(
     "/level1/transform",
     async (HttpContext ctx, IHttpClientFactory httpFactory, CancellationToken ct, int limit = 30) =>
@@ -65,38 +103,31 @@ app.MapGet(
             ct
         );
 
-        var output = ctx.Response.BodyWriter;
-        await using var writer = new Utf8JsonWriter(output);
-
-        writer.WriteStartObject();
-        writer.WriteStartArray("products"u8);
-
-        var count = await upstream.Pipe.ProjectTypedAsync(
-            JsonPath.At("products"),
-            writer,
-            SampleJsonContext.Default.ProductInput,
-            SampleJsonContext.Default.ProductOutput,
-            product => [new ProductOutput
+        await upstream.Pipe.TransformItemsWithEnvelopeAsync(
+            ctx.Response.BodyWriter,
+            JsonPath.At("products").Each(),
+            (bytes, w) =>
             {
-                Id = product.Id,
-                Title = product.Title,
-                Brand = product.Brand ?? "Unknown",
-                OriginalPrice = product.Price,
-                SalePrice = Math.Round(
-                    product.Price * (1 - product.DiscountPercentage / 100),
-                    2
-                ),
-                Rating = product.Rating,
-                InStock = product.Stock > 0,
-            }],
-            ct
+                var r = new Utf8JsonReader(bytes);
+                var product = JsonSerializer.Deserialize(ref r, SampleJsonContext.Default.ProductInput);
+                if (product is null) return;
+                JsonSerializer.Serialize(w.Json, new ProductOutput
+                {
+                    Id = product.Id,
+                    Title = product.Title,
+                    Brand = product.Brand ?? "Unknown",
+                    OriginalPrice = product.Price,
+                    SalePrice = Math.Round(product.Price * (1 - product.DiscountPercentage / 100), 2),
+                    Rating = product.Rating,
+                    InStock = product.Stock > 0,
+                }, SampleJsonContext.Default.ProductOutput);
+                w.Json.Flush();
+                w.Json.Reset();
+            },
+            ct: ct
         );
 
-        writer.WriteEndArray();
-        writer.WriteNumber("count"u8, count);
-        writer.WriteEndObject();
-        await writer.FlushAsync(ct);
-        await output.FlushAsync(ct);
+        await ctx.Response.BodyWriter.FlushAsync(ct);
     }
 );
 
@@ -118,7 +149,7 @@ app.MapGet(
         writer.WriteStartArray("photos"u8);
 
         var count = await upstream.Pipe.ProjectTypedAsync(
-            JsonPath.Root,
+            JsonPath.Each(),
             writer,
             SampleJsonContext.Default.Photo,
             SampleJsonContext.Default.Photo,
@@ -135,12 +166,10 @@ app.MapGet(
 );
 
 // ════════════════════════════════════════════════════════════════════════
-// LEVEL 2 — Mid-level: ProjectTypedAsync with custom envelope
+// LEVEL 2 — Custom envelope with TransformItemsAsync
 //
-// You own the Utf8JsonWriter and the JSON envelope. The extension method
-// handles deserialization/serialization via source-gen JsonTypeInfo<T>.
-// Trade-off: more control over output structure, but you manage
-// writer lifecycle, envelope, and flush yourself.
+// When built-in framers don't fit (extra metadata fields, custom key names),
+// own the Utf8JsonWriter and write the envelope yourself.
 // ════════════════════════════════════════════════════════════════════════
 
 // Typed transform with custom envelope — add metadata fields, nest differently.
@@ -196,10 +225,10 @@ app.MapGet(
 );
 
 // ════════════════════════════════════════════════════════════════════════
-// LEVEL 3 — Low-level: ProjectItemsAsync with raw byte callback
+// LEVEL 3 — Low-level: TransformItemsWithEnvelopeAsync + w.Json
 //
-// You get raw bytes per item. You decide what to parse and what to write.
-// Trade-off: full control, but you handle Utf8JsonReader/JsonDocument yourself.
+// You get raw bytes per item and write via w.Json (the library's Utf8JsonWriter).
+// The framer owns the envelope; you own field selection per item.
 // Use when: you need partial field extraction, or mixed parsing strategies.
 // ════════════════════════════════════════════════════════════════════════
 
@@ -211,41 +240,28 @@ app.MapGet(
     {
         await using var upstream = await ctx.StreamFrom(
             httpFactory,
-            "https://jsonplaceholder.typicode.com/comments"
+            "https://jsonplaceholder.typicode.com/comments",
+            ct
         );
 
-        var pipeWriter = ctx.Response.BodyWriter;
-        await using var writer = new Utf8JsonWriter(pipeWriter);
-
-        writer.WriteStartObject();
-        writer.WriteStartArray("comments"u8);
-
-        int count = 0;
-        await upstream.Pipe.TransformItemsAsync(
-            PipeWriter.Create(Stream.Null),
-            JsonPath.Root,
-            (itemBytes, _) =>
+        await upstream.Pipe.TransformItemsWithEnvelopeAsync(
+            ctx.Response.BodyWriter,
+            JsonPath.Each(),
+            (bytes, w) =>
             {
-                // Parse only what we need — skip 3 of 5 fields
-                using var doc = JsonDocument.Parse(itemBytes);
+                using var doc = JsonDocument.Parse(bytes);
                 var root = doc.RootElement;
-
-                writer.WriteStartObject();
-                writer.WriteString("email"u8, root.GetProperty("email").GetString());
-                writer.WriteString("body"u8, root.GetProperty("body").GetString());
-                writer.WriteEndObject();
-                count++;
-
+                w.Json.WriteStartObject();
+                w.Json.WriteString("email"u8, root.GetProperty("email").GetString());
+                w.Json.WriteString("body"u8, root.GetProperty("body").GetString());
+                w.Json.WriteEndObject();
+                w.Json.Flush();
+                w.Json.Reset();
             },
             ct: ct
         );
 
-        writer.WriteEndArray();
-        writer.WriteNumber("count"u8, count);
-        writer.WriteEndObject();
-        writer.Flush();
-
-        await pipeWriter.FlushAsync(ct);
+        await ctx.Response.BodyWriter.FlushAsync(ct);
     }
 );
 
@@ -422,7 +438,7 @@ app.MapGet(
         try
         {
             await upstream.Pipe.ForEachItemAsync(
-                JsonPath.Root,
+                JsonPath.Each(),
                 itemBytes =>
                 {
                     // Re-serialize compact — upstream may be pretty-printed
