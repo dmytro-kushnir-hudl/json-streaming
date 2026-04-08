@@ -113,10 +113,9 @@ public class ProjectItemsTests
         var pipe = ToPipe(PeopleJson, bufferSize);
         var output = PipeWriter.Create(Stream.Null);
 
-        await pipe.TransformItemsAsync(output, JsonPath.Each(), (itemBytes, writer) =>
+        await pipe.TransformItemsAsync(output, JsonPath.Each(), (itemBytes, _) =>
         {
             items.Add(Encoding.UTF8.GetString(itemBytes));
-            writer.Write(itemBytes);
         }, ct: TestContext.Current.CancellationToken);
 
         items.Should().HaveCount(3);

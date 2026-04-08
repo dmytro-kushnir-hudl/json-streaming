@@ -53,33 +53,33 @@ public class StreamingBenchmarks
         JsonSerializer.Serialize(Stream.Null, results, BenchJsonContext.Default.ListBenchItemSlim);
     }
 
-    // ── 3. ProjectItemsAsync: verbatim passthrough ─────────────────────────
+    // ── 3. TransformItemsAsync: verbatim passthrough ─────────────────────────
 
     [Benchmark(Description = "ProjectItems: verbatim")]
     public async Task Write_Verbatim()
     {
         var pipeReader = ToPipe(_json);
         var pipeWriter = PipeWriter.Create(Stream.Null);
-        await pipeReader.ProjectItemsAsyncHighLevel(
-            JsonPath.At("items").Each(),
+        await pipeReader.TransformItemsAsync(
             pipeWriter,
+            JsonPath.At("items").Each(),
             (itemBytes, bufferWriter) =>
             {
-                WriteSequence(bufferWriter, itemBytes);
-                return ValueTask.CompletedTask;
+                bufferWriter.Write(itemBytes);
             });
     }
 
-    // ── 4. ProjectItemsAsync: transform via JsonDocument ─────────────────
+    // ── 4. TransformItemsAsync: transform via JsonDocument ─────────────────
 
     [Benchmark(Description = "ProjectItems: transform (JsonDocument)")]
     public async Task Write_TransformJsonDocument()
     {
         var pipe = ToPipe(_json);
         var output = PipeWriter.Create(Stream.Null);
-        await pipe.ProjectItemsAsyncHighLevel(
-            JsonPath.At("items").Each(),
+        await pipe.TransformItemsAsync(
             output,
+            JsonPath.At("items").Each(),
+            
             (itemBytes, bufferWriter) =>
             {
                 using var doc = JsonDocument.Parse(itemBytes);
@@ -90,20 +90,19 @@ public class StreamingBenchmarks
                 writer.WriteString("title"u8, root.GetProperty("title").GetString());
                 writer.WriteEndObject();
                 writer.Flush();
-                return ValueTask.CompletedTask;
             });
     }
 
-    // ── 6. ProjectItemsAsync: zero-alloc Utf8JsonReader transform ────────
+    // ── 6. TransformItemsAsync: zero-alloc Utf8JsonReader transform ────────
 
     [Benchmark(Description = "ProjectItems: transform (Utf8JsonReader, zero-alloc)")]
     public async Task Write_TransformUtf8Reader()
     {
         var pipe = ToPipe(_json);
         var output = PipeWriter.Create(Stream.Null);
-        await pipe.ProjectItemsAsyncHighLevel(
-            JsonPath.At("items").Each(),
+        await pipe.TransformItemsAsync(
             output,
+            JsonPath.At("items").Each(),
             (itemBytes, bufferWriter) =>
             {
                 var reader = new Utf8JsonReader(itemBytes);
@@ -133,20 +132,19 @@ public class StreamingBenchmarks
                 }
                 writer.WriteEndObject();
                 writer.Flush();
-                return ValueTask.CompletedTask;
             });
     }
 
-    // ── 7. ProjectItemsAsync: typed direct-write ─────────────────────────
+    // ── 7. TransformItemsAsync: typed direct-write ─────────────────────────
 
     [Benchmark(Description = "ProjectItems: typed direct-write (no TOut alloc)")]
     public async Task Write_TypedDirectWrite()
     {
         var pipe = ToPipe(_json);
         var output = PipeWriter.Create(Stream.Null);
-        await pipe.ProjectItemsAsyncHighLevel(
-            JsonPath.At("items").Each(),
+        await pipe.TransformItemsAsync(
             output,
+            JsonPath.At("items").Each(),
             (itemBytes, bufferWriter) =>
             {
                 var reader = new Utf8JsonReader(itemBytes);
@@ -160,20 +158,19 @@ public class StreamingBenchmarks
                     writer.WriteEndObject();
                     writer.Flush();
                 }
-                return ValueTask.CompletedTask;
             });
     }
 
-    // ── 8. ProjectItemsAsync: typed transform (TIn → TOut) ──────────────
+    // ── 8. TransformItemsAsync: typed transform (TIn → TOut) ──────────────
 
     [Benchmark(Description = "ProjectItems: typed transform (TIn → TOut)")]
     public async Task Write_TypedTransform()
     {
         var pipe = ToPipe(_json);
         var output = PipeWriter.Create(Stream.Null);
-        await pipe.ProjectItemsAsyncHighLevel(
-            JsonPath.At("items").Each(),
+        await pipe.TransformItemsAsync(
             output,
+            JsonPath.At("items").Each(),
             (itemBytes, bufferWriter) =>
             {
                 var reader = new Utf8JsonReader(itemBytes);
@@ -185,26 +182,24 @@ public class StreamingBenchmarks
                     JsonSerializer.Serialize(writer, slim, BenchJsonContext.Default.BenchItemSlim);
                     writer.Flush();
                 }
-                return ValueTask.CompletedTask;
             });
     }
 
     // ── 10. NDJSON: callback approach vs transcoder ──────────────────────
 
-    [Benchmark(Description = "NDJSON: ProjectItemsAsync titles")]
+    [Benchmark(Description = "NDJSON: TransformItemsAsync titles")]
     public async Task Ndjson_ProjectTitles_Manual()
     {
         var pipe = ToPipe(_json);
         var output = PipeWriter.Create(Stream.Null);
         using var writer = new Utf8JsonWriter(output, SkipValidation);
 
-        await pipe.ProjectItemsAsync(
-            JsonPath.At("items").Each(),
+        await pipe.TransformItemsAsync(
             PipeWriter.Create(Stream.Null),
+            JsonPath.At("items").Each(),
             (itemBytes, _) =>
             {
                 WriteTitleNdjsonLine(itemBytes, writer, output);
-                return ValueTask.CompletedTask;
             });
 
         writer.Flush();
@@ -230,20 +225,19 @@ public class StreamingBenchmarks
         await writer.CompleteAsync();
     }
 
-    [Benchmark(Description = "NDJSON: ProjectItemsAsync all items")]
+    [Benchmark(Description = "NDJSON: TransformItemsAsync all items")]
     public async Task Ndjson_ProjectAllItems_Manual()
     {
         var pipe = ToPipe(_json);
         var output = PipeWriter.Create(Stream.Null);
 
-        await pipe.ProjectItemsAsync(
-            JsonPath.At("items").Each(),
+        await pipe.TransformItemsAsync(
             PipeWriter.Create(Stream.Null),
+            JsonPath.At("items").Each(),
             (itemBytes, pw) =>
             {
-                WriteSequence(pw, itemBytes);
+                pw.Write(itemBytes);
                 pw.Write("\n"u8);
-                return ValueTask.CompletedTask;
             });
 
         await output.FlushAsync();
@@ -326,15 +320,7 @@ public class StreamingBenchmarks
         }
     }
 
-    private static void WriteSequence(IBufferWriter<byte> output, ReadOnlySequence<byte> sequence)
-    {
-        foreach (var segment in sequence)
-        {
-            var destination = output.GetSpan(segment.Length);
-            segment.Span.CopyTo(destination);
-            output.Advance(segment.Length);
-        }
-    }
+   
 
     private static void FlushPipeWriterIfNeeded(PipeWriter output)
     {

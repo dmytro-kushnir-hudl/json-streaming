@@ -2,7 +2,7 @@ using System.Buffers;
 
 namespace JsonStreaming;
 
-public readonly struct PooledByteBufferWriter 
+public readonly struct PooledByteBufferWriter : IBufferWriter<byte>
 {
     private readonly IBufferWriter<byte> _bufferWriterImplementation;
     internal PooledByteBufferWriter(IBufferWriter<byte> bufferWriterImplementation)
@@ -22,4 +22,8 @@ public readonly struct PooledByteBufferWriter
         value.CopyTo(span);
         _bufferWriterImplementation.Advance(length);
     }
+
+    void IBufferWriter<byte>.Advance(int count) => _bufferWriterImplementation.Advance(count);
+    Memory<byte> IBufferWriter<byte>.GetMemory(int sizeHint = 0) => _bufferWriterImplementation.GetMemory(sizeHint);
+    Span<byte> IBufferWriter<byte>.GetSpan(int sizeHint = 0) => _bufferWriterImplementation.GetSpan(sizeHint);
 }
