@@ -23,7 +23,7 @@ public class JsonTranscoderTests
             new StreamPipeReaderOptions(bufferSize: bufferSize)
         );
 
-    private static async Task<string[]> ProjectAsync(string json, NdJsonPath path, int bufferSize, bool direct)
+    private static async Task<string[]> ProjectAsync(string json, JsonPath path, int bufferSize, bool direct)
     {
         var pipe = ToPipe(json, bufferSize);
         await using var output = new MemoryStream();
@@ -45,7 +45,7 @@ public class JsonTranscoderTests
     [InlineData(64)]
     public async Task ProjectNdJsonDirect_PrimitiveProjection_MatchesWriterVariant(int bufferSize)
     {
-        var path = NdJsonPath.At("shipTo").Key("city");
+        var path = JsonPath.At("shipTo").Key("city");
 
         var expected = await ProjectAsync(OrderJson, path, bufferSize, direct: false);
         var actual = await ProjectAsync(OrderJson, path, bufferSize, direct: true);
@@ -67,7 +67,7 @@ public class JsonTranscoderTests
               ]
             }
             """;
-        var path = NdJsonPath.At("items").Each();
+        var path = JsonPath.At("items").Each();
 
         var expected = await ProjectAsync(json, path, bufferSize, direct: false);
         var actual = await ProjectAsync(json, path, bufferSize, direct: true);
@@ -96,7 +96,7 @@ public class JsonTranscoderTests
     public async Task FormattedProjection_EachElement_RoundTrips()
     {
         // Step 1: Project all elements via minified renderer
-        var projected = await ProjectAsync(PeopleJson, NdJsonPath.Each(), bufferSize: 64, direct: false);
+        var projected = await ProjectAsync(PeopleJson, JsonPath.Each(), bufferSize: 64, direct: false);
         projected.Should().HaveCount(3);
 
         // Step 2: Each projected element is valid JSON that round-trips
@@ -119,7 +119,7 @@ public class JsonTranscoderTests
         // Step 3: Verbatim renderer produces same number of elements
         // Note: verbatim output uses raw buffer copy which may differ in whitespace
         // from minified output, but element count should match
-        var verbatim = await ProjectAsync(PeopleJson, NdJsonPath.Each(), bufferSize: 64, direct: true);
+        var verbatim = await ProjectAsync(PeopleJson, JsonPath.Each(), bufferSize: 64, direct: true);
         verbatim.Should().HaveCount(projected.Length,
             "verbatim and minified renderers should find the same number of elements");
 

@@ -35,7 +35,7 @@ app.MapGet(
 
         int count = 0;
         await upstream.Pipe.ProjectItemsAsync(
-            NdJsonPath.Root,
+            JsonPath.Root,
             output,
             (itemBytes, pw) =>
             {
@@ -72,7 +72,7 @@ app.MapGet(
         writer.WriteStartArray("products"u8);
 
         var count = await upstream.Pipe.ProjectTypedAsync(
-            NdJsonPath.At("products"),
+            JsonPath.At("products"),
             writer,
             SampleJsonContext.Default.ProductInput,
             SampleJsonContext.Default.ProductOutput,
@@ -118,7 +118,7 @@ app.MapGet(
         writer.WriteStartArray("photos"u8);
 
         var count = await upstream.Pipe.ProjectTypedAsync(
-            NdJsonPath.Root,
+            JsonPath.Root,
             writer,
             SampleJsonContext.Default.Photo,
             SampleJsonContext.Default.Photo,
@@ -165,7 +165,7 @@ app.MapGet(
         writer.WriteStartArray("products"u8);
 
         var count = await upstream.Pipe.ProjectTypedAsync(
-            NdJsonPath.At("products"),
+            JsonPath.At("products"),
             writer,
             SampleJsonContext.Default.ProductInput,
             SampleJsonContext.Default.ProductOutput,
@@ -222,7 +222,7 @@ app.MapGet(
 
         int count = 0;
         await upstream.Pipe.ProjectItemsAsync(
-            NdJsonPath.Root,
+            JsonPath.Root,
             PipeWriter.Create(Stream.Null),
             (itemBytes, _) =>
             {
@@ -272,7 +272,7 @@ app.MapGet(
         double totalValue = 0;
 
         await upstream.Pipe.ForEachItemAsync(
-            NdJsonPath.At("products"),
+            JsonPath.At("products"),
             itemBytes =>
             {
                 var reader = new Utf8JsonReader(itemBytes);
@@ -342,7 +342,7 @@ app.MapGet(
         try
         {
             await upstream.Pipe.ForEachItemAsync(
-                NdJsonPath.At("products"),
+                JsonPath.At("products"),
                 itemBytes =>
                 {
                     var reader = new Utf8JsonReader(itemBytes);
@@ -422,7 +422,7 @@ app.MapGet(
         try
         {
             await upstream.Pipe.ForEachItemAsync(
-                NdJsonPath.Root,
+                JsonPath.Root,
                 itemBytes =>
                 {
                     // Re-serialize compact — upstream may be pretty-printed
@@ -474,7 +474,7 @@ app.MapGet(
         );
 
         await upstream.Pipe.ProjectNdJsonVerbatimAsync(
-            NdJsonPath.At("products").Each().Key("title"),
+            JsonPath.At("products").Each().Key("title"),
             ctx.Response.BodyWriter,
             ct: ct
         );
@@ -522,7 +522,7 @@ app.MapGet(
         );
 
         // Deep path: navigate data → pages → [*] → todos
-        var path = NdJsonPath.At("data").Key("pages").Each().Key("todos");
+        var path = JsonPath.At("data").Key("pages").Each().Key("todos");
 
         var output = ctx.Response.BodyWriter;
         await using var writer = new Utf8JsonWriter(output);
@@ -566,7 +566,7 @@ app.MapGet(
 
         // DummyJSON wraps products in {"products": [...], "total": ...}
         // Navigate with NdJsonPath: $.products
-        var path = NdJsonPath.At("products");
+        var path = JsonPath.At("products");
 
         var output = ctx.Response.BodyWriter;
         await using var writer = new Utf8JsonWriter(output);
@@ -615,7 +615,7 @@ app.MapGet(
         );
 
         // Parse from NdJsonPath string — equivalent to NdJsonPath.At("products")
-        var path = NdJsonPath.Parse("$.products");
+        var path = JsonPath.Parse("$.products");
 
         var output = ctx.Response.BodyWriter;
         await using var writer = new Utf8JsonWriter(output);
@@ -687,7 +687,7 @@ app.MapGet(
 
             int pageCount = 0;
             await pipe.ProjectItemsAsync(
-                NdJsonPath.At("todos"),
+                JsonPath.At("todos"),
                 pipeWriter,
                 (itemBytes, pw) =>
                 {

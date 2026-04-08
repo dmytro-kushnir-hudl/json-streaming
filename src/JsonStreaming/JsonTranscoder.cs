@@ -117,7 +117,7 @@ public static class JsonTranscoder
     /// </summary>
     public static async Task ProjectNdJsonAsync(
         this PipeReader reader,
-        NdJsonPath path,
+        JsonPath path,
         PipeWriter writer,
         JsonReaderOptions readerOptions = default,
         JsonWriterOptions writerOptions = default,
@@ -175,7 +175,7 @@ public static class JsonTranscoder
     /// </summary>
     public static async Task ProjectNdJsonVerbatimAsync(
         this PipeReader reader,
-        NdJsonPath path,
+        JsonPath path,
         PipeWriter writer,
         JsonReaderOptions options = default,
         CancellationToken ct = default
@@ -230,7 +230,7 @@ public static class JsonTranscoder
     /// </summary>
     public static async Task ProjectItemsAsync(
         this PipeReader reader,
-        NdJsonPath path,
+        JsonPath path,
         PipeWriter writer,
         Func<ReadOnlySequence<byte>, PipeWriter, ValueTask> processItem,
         JsonReaderOptions readerOptions = default,
@@ -267,10 +267,7 @@ public static class JsonTranscoder
                     ParserDirective directive;
                     try
                     {
-                        ReadOnlySpan<byte> name = jsonReader.TokenType == JsonTokenType.PropertyName
-                                ? GetPropertyName(ref jsonReader, ref rentedName)
-                                : default;
-                        directive = state.Advance(jsonReader.TokenType, path.Segments, name);
+                        directive = state.Advance(jsonReader, path.Segments);
                     }
                     finally
                     {
@@ -311,7 +308,7 @@ public static class JsonTranscoder
                                 int finalLen = (int)(endPos - captureStartIndex);
                                 EnsureAccumulator(ref accumulator, accumulatedLength + finalLen);
                                 buffer.Slice(buffer.GetPosition(captureStartIndex), finalLen)
-                                      .CopyTo(accumulator.AsSpan(accumulatedLength));
+                                    .CopyTo(accumulator.AsSpan(accumulatedLength));
                                 accumulatedLength += finalLen;
 
                                 itemSlice = new ReadOnlySequence<byte>(
@@ -373,9 +370,10 @@ public static class JsonTranscoder
                     {
                         EnsureAccumulator(ref accumulator, accumulatedLength + captureLen);
                         buffer.Slice(buffer.GetPosition(captureStartIndex), captureLen)
-                              .CopyTo(accumulator.AsSpan(accumulatedLength));
+                            .CopyTo(accumulator.AsSpan(accumulatedLength));
                         accumulatedLength += captureLen;
                     }
+
                     captureStartIndex = 0;
                 }
 
@@ -462,12 +460,12 @@ public static class JsonTranscoder
                     state.NeedsComma = true;
                     break;
                 case JsonTokenType.PropertyName:
-                    CopyToken(reader, pipeWriter, readResult);
+                    pipeWriter.CopyToken(reader, readResult);
                     state.AfterColon = true;
                     state.NeedsComma = false;
                     break;
                 default:
-                    CopyToken(reader, pipeWriter, readResult);
+                    pipeWriter.CopyToken(reader, readResult);
                     state.NeedsComma = true;
                     break;
             }
@@ -504,12 +502,12 @@ public static class JsonTranscoder
             state.NeedsComma = reader.TokenType switch
             {
                 JsonTokenType.StartObject
-                or JsonTokenType.StartArray
-                or JsonTokenType.PropertyName => false,
+                    or JsonTokenType.StartArray
+                    or JsonTokenType.PropertyName => false,
                 _ => true,
             };
 
-            CopyToken(reader, pipeWriter, readResult);
+            pipeWriter.CopyToken(reader, readResult);
         }
 
         state.State = reader.CurrentState;
@@ -538,21 +536,7 @@ public static class JsonTranscoder
 
         while (hasToken)
         {
-            byte[]? rentedBuffer = null;
-            ParserDirective directive;
-            try
-            {
-                ReadOnlySpan<byte> name = reader.TokenType == JsonTokenType.PropertyName
-                        ? GetPropertyName(ref reader, ref rentedBuffer)
-                        : default;
-
-                directive = state.Advance(reader.TokenType, pattern, name);
-            }
-            finally
-            {
-                if (rentedBuffer != null)
-                    ArrayPool<byte>.Shared.Return(rentedBuffer);
-            }
+            var directive = state.Advance(reader, pattern);
 
             switch (directive)
             {
@@ -588,42 +572,6 @@ public static class JsonTranscoder
         return reader.BytesConsumed;
     }
 
-    // ── Shared helpers ────────────────────────────────────────────────────────
-
-    private static ReadOnlySpan<byte> GetPropertyName(
-        ref Utf8JsonReader reader,
-        ref byte[]? rentedBuffer)
-    {
-        if (!reader.HasValueSequence)
-            return reader.ValueSpan;
-
-        int len = (int)reader.ValueSequence.Length;
-        rentedBuffer = ArrayPool<byte>.Shared.Rent(len);
-        reader.ValueSequence.CopyTo(rentedBuffer);
-        return rentedBuffer.AsSpan(0, len);
-    }
-
-    private static void CopyToken(
-        Utf8JsonReader reader,
-        PipeWriter pipeWriter,
-        ReadResult readResult
-    )
-    {
-        int start = (int)reader.TokenStartIndex;
-        int length = (int)(reader.BytesConsumed - reader.TokenStartIndex);
-
-        if (readResult.Buffer.IsSingleSegment)
-        {
-            pipeWriter.Write(readResult.Buffer.FirstSpan.Slice(start, length));
-        }
-        else
-        {
-            var slice = readResult.Buffer.Slice(start, length);
-            foreach (var seg in slice)
-                pipeWriter.Write(seg.Span);
-        }
-    }
-
     // ── Directive & Strategy types ───────────────────────────────────────
 
     private enum ParserDirective
@@ -633,160 +581,6 @@ public static class JsonTranscoder
         BeginCapture,
         Capture,
         EndCapture,
-    }
-
-    private interface ITokenRenderer
-    {
-        void WriteToken(ref Utf8JsonReader reader, PipeWriter pipeWriter, ReadResult readResult);
-        void Reset();
-    }
-
-    private interface IItemFramer
-    {
-        void BeginDocument(PipeWriter pipeWriter);
-        void FinishItem(PipeWriter pipeWriter);
-        void EndDocument(PipeWriter pipeWriter);
-    }
-
-    // ── Strategy implementations ────────────────────────────────────────
-
-    private struct MinifiedRenderer : ITokenRenderer
-    {
-        private Utf8JsonWriter _jwriter;
-
-        public MinifiedRenderer(Utf8JsonWriter jwriter) => _jwriter = jwriter;
-
-        public void WriteToken(ref Utf8JsonReader reader, PipeWriter pipeWriter, ReadResult readResult)
-        {
-            switch (reader.TokenType)
-            {
-                case JsonTokenType.StartObject: _jwriter.WriteStartObject(); break;
-                case JsonTokenType.EndObject:   _jwriter.WriteEndObject(); break;
-                case JsonTokenType.StartArray:  _jwriter.WriteStartArray(); break;
-                case JsonTokenType.EndArray:    _jwriter.WriteEndArray(); break;
-                case JsonTokenType.True:        _jwriter.WriteBooleanValue(true); break;
-                case JsonTokenType.False:       _jwriter.WriteBooleanValue(false); break;
-                case JsonTokenType.Null:        _jwriter.WriteNullValue(); break;
-
-                case JsonTokenType.PropertyName:
-                case JsonTokenType.String:
-                case JsonTokenType.Number:
-                    WriteValueToken(ref reader);
-                    break;
-
-                case JsonTokenType.Comment:
-                case JsonTokenType.None:
-                    break;
-            }
-        }
-
-        public void Reset()
-        {
-            _jwriter.Flush();
-            _jwriter.Reset();
-        }
-
-        private void WriteValueToken(ref Utf8JsonReader reader)
-        {
-            if (!reader.HasValueSequence)
-            {
-                switch (reader.TokenType)
-                {
-                    case JsonTokenType.PropertyName: _jwriter.WritePropertyName(reader.ValueSpan); break;
-                    case JsonTokenType.String:       _jwriter.WriteStringValue(reader.ValueSpan); break;
-                    case JsonTokenType.Number:       _jwriter.WriteRawValue(reader.ValueSpan, skipInputValidation: true); break;
-                }
-            }
-            else
-            {
-                int len = (int)reader.ValueSequence.Length;
-                byte[] rented = ArrayPool<byte>.Shared.Rent(len);
-                try
-                {
-                    reader.ValueSequence.CopyTo(rented);
-                    ReadOnlySpan<byte> span = rented.AsSpan(0, len);
-                    switch (reader.TokenType)
-                    {
-                        case JsonTokenType.PropertyName: _jwriter.WritePropertyName(span); break;
-                        case JsonTokenType.String:       _jwriter.WriteStringValue(span); break;
-                        case JsonTokenType.Number:       _jwriter.WriteRawValue(span, skipInputValidation: true); break;
-                    }
-                }
-                finally
-                {
-                    ArrayPool<byte>.Shared.Return(rented);
-                }
-            }
-        }
-    }
-
-    private struct VerbatimRenderer : ITokenRenderer
-    {
-        private bool _needsComma;
-
-        public void WriteToken(ref Utf8JsonReader reader, PipeWriter pipeWriter, ReadResult readResult)
-        {
-            if (_needsComma && reader.TokenType is not JsonTokenType.EndObject and not JsonTokenType.EndArray)
-                pipeWriter.Write(","u8);
-
-            _needsComma = reader.TokenType switch
-            {
-                JsonTokenType.StartObject or JsonTokenType.StartArray or JsonTokenType.PropertyName => false,
-                _ => true,
-            };
-
-            CopyToken(reader, pipeWriter, readResult);
-        }
-
-        public void Reset() => _needsComma = false;
-    }
-
-    private struct NdJsonFramer : IItemFramer
-    {
-        public void BeginDocument(PipeWriter pipeWriter) { }
-        public void FinishItem(PipeWriter pipeWriter) => pipeWriter.Write("\n"u8);
-        public void EndDocument(PipeWriter pipeWriter) { }
-    }
-
-    private struct JsonArrayFramer : IItemFramer
-    {
-        private bool _needsComma;
-
-        public void BeginDocument(PipeWriter pipeWriter) => pipeWriter.Write("["u8);
-
-        public void FinishItem(PipeWriter pipeWriter)
-        {
-            if (_needsComma)
-                pipeWriter.Write(","u8);
-            _needsComma = true;
-        }
-
-        public void EndDocument(PipeWriter pipeWriter) => pipeWriter.Write("]"u8);
-    }
-
-    private struct JsonEnvelopeFramer : IItemFramer
-    {
-        private bool _needsComma;
-        private int _count;
-
-        public void BeginDocument(PipeWriter pipeWriter) => pipeWriter.Write("{\"results\":["u8);
-
-        public void FinishItem(PipeWriter pipeWriter)
-        {
-            if (_needsComma)
-                pipeWriter.Write(","u8);
-            _needsComma = true;
-            _count++;
-        }
-
-        public void EndDocument(PipeWriter pipeWriter)
-        {
-            pipeWriter.Write("],\"count\":"u8);
-            Span<byte> buf = stackalloc byte[20];
-            if (System.Buffers.Text.Utf8Formatter.TryFormat(_count, buf, out int written))
-                pipeWriter.Write(buf[..written]);
-            pipeWriter.Write("}"u8);
-        }
     }
 
     // ── State classes ─────────────────────────────────────────────────────────
@@ -816,11 +610,10 @@ public static class JsonTranscoder
         private int _captureDepth;
         public JsonReaderState ReaderState;
 
-        public ParserDirective Advance(
-            JsonTokenType tokenType,
-            byte[][] pattern,
-            ReadOnlySpan<byte> propertyName = default)
+        public ParserDirective Advance(Utf8JsonReader reader, byte[][] pattern)
         {
+            var tokenType = reader.TokenType;
+            
             // ── CAPTURE PHASE ─────────────────────────────────────────
             if (_isCapturing)
             {
@@ -838,12 +631,13 @@ public static class JsonTranscoder
                 return ParserDirective.Capture;
             }
 
+
             // ── SEARCH PHASE ──────────────────────────────────────────
             switch (tokenType)
             {
                 case JsonTokenType.PropertyName:
                     _pendingPropertyMatches = _matchedDepth == _depth
-                        && MatchesPropertyName(pattern, _matchedDepth, propertyName);
+                                              && MatchesPropertyName(pattern, _matchedDepth, reader);
                     return ParserDirective.Skip;
 
                 case JsonTokenType.StartObject:
@@ -853,7 +647,7 @@ public static class JsonTranscoder
                     bool parentIsArray = _depth >= 0 && _isArray[_depth];
 
                     bool seg = _matchedDepth == _depth
-                        && MatchesSegment(_matchedDepth, pattern, parentIsArray, _pendingPropertyMatches);
+                               && MatchesSegment(_matchedDepth, pattern, parentIsArray, _pendingPropertyMatches);
                     _pendingPropertyMatches = false;
 
                     _depth++;
@@ -883,6 +677,7 @@ public static class JsonTranscoder
                         _matchedDepth = _matchedDepthStack[_depth];
                         _depth--;
                     }
+
                     return ParserDirective.Skip;
 
                 default:
@@ -890,7 +685,7 @@ public static class JsonTranscoder
                     bool parentIsArray = _depth >= 0 && _isArray[_depth];
 
                     bool seg = _matchedDepth == _depth
-                        && MatchesSegment(_matchedDepth, pattern, parentIsArray, _pendingPropertyMatches);
+                               && MatchesSegment(_matchedDepth, pattern, parentIsArray, _pendingPropertyMatches);
                     _pendingPropertyMatches = false;
 
                     if (seg && _matchedDepth + 1 == pattern.Length)
@@ -921,7 +716,7 @@ public static class JsonTranscoder
         private static bool MatchesPropertyName(
             byte[][] pattern,
             int matchedDepth,
-            ReadOnlySpan<byte> propertyName)
+            Utf8JsonReader reader)
         {
             if (matchedDepth >= pattern.Length)
                 return false;
@@ -930,7 +725,219 @@ public static class JsonTranscoder
             if (expected.Length == 0)
                 return false;
 
-            return propertyName.SequenceEqual(expected);
+            return reader.HasValueSequence
+                ? reader.ValueSequence.SequenceEqual(expected)
+                : reader.ValueSpan.SequenceEqual(expected);
+        }
+    }
+}
+
+public interface ITokenRenderer
+{
+    void WriteToken(ref Utf8JsonReader reader, PipeWriter pipeWriter, ReadResult readResult);
+    void Reset();
+}
+
+public interface IItemFramer
+{
+    void BeginDocument(PipeWriter pipeWriter);
+    void FinishItem(PipeWriter pipeWriter);
+    void EndDocument(PipeWriter pipeWriter);
+}
+
+// ── Strategy implementations ────────────────────────────────────────
+
+public struct MinifiedRenderer : ITokenRenderer
+{
+    private Utf8JsonWriter _jwriter;
+
+    public MinifiedRenderer(Utf8JsonWriter jwriter) => _jwriter = jwriter;
+
+    public void WriteToken(ref Utf8JsonReader reader, PipeWriter pipeWriter, ReadResult readResult)
+    {
+        switch (reader.TokenType)
+        {
+            case JsonTokenType.StartObject: _jwriter.WriteStartObject(); break;
+            case JsonTokenType.EndObject: _jwriter.WriteEndObject(); break;
+            case JsonTokenType.StartArray: _jwriter.WriteStartArray(); break;
+            case JsonTokenType.EndArray: _jwriter.WriteEndArray(); break;
+            case JsonTokenType.True: _jwriter.WriteBooleanValue(true); break;
+            case JsonTokenType.False: _jwriter.WriteBooleanValue(false); break;
+            case JsonTokenType.Null: _jwriter.WriteNullValue(); break;
+
+            case JsonTokenType.PropertyName:
+            case JsonTokenType.String:
+            case JsonTokenType.Number:
+                WriteValueToken(ref reader);
+                break;
+
+            case JsonTokenType.Comment:
+            case JsonTokenType.None:
+                break;
+        }
+    }
+
+    public void Reset()
+    {
+        _jwriter.Flush();
+        _jwriter.Reset();
+    }
+
+    private void WriteValueToken(ref Utf8JsonReader reader)
+    {
+        if (!reader.HasValueSequence)
+        {
+            switch (reader.TokenType)
+            {
+                case JsonTokenType.PropertyName: _jwriter.WritePropertyName(reader.ValueSpan); break;
+                case JsonTokenType.String: _jwriter.WriteStringValue(reader.ValueSpan); break;
+                case JsonTokenType.Number: _jwriter.WriteRawValue(reader.ValueSpan, skipInputValidation: true); break;
+            }
+            return;
+        }
+        
+        int len = (int)reader.ValueSequence.Length;
+        byte[] rented = ArrayPool<byte>.Shared.Rent(len);
+        try
+        {
+            reader.ValueSequence.CopyTo(rented);
+            ReadOnlySpan<byte> span = rented.AsSpan(0, len);
+            switch (reader.TokenType)
+            {
+                case JsonTokenType.PropertyName: _jwriter.WritePropertyName(span); break;
+                case JsonTokenType.String: _jwriter.WriteStringValue(span); break;
+                case JsonTokenType.Number: _jwriter.WriteRawValue(span, skipInputValidation: true); break;
+            }
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(rented);
+        }
+    }
+}
+
+public struct VerbatimRenderer : ITokenRenderer
+{
+    private bool _needsComma;
+
+    public void WriteToken(ref Utf8JsonReader reader, PipeWriter pipeWriter, ReadResult readResult)
+    {
+        if (_needsComma && reader.TokenType is not JsonTokenType.EndObject and not JsonTokenType.EndArray)
+            pipeWriter.Write(","u8);
+
+        _needsComma = reader.TokenType switch
+        {
+            JsonTokenType.StartObject or JsonTokenType.StartArray or JsonTokenType.PropertyName => false,
+            _ => true,
+        };
+
+        pipeWriter.CopyToken(reader, readResult);
+    }
+
+    public void Reset() => _needsComma = false;
+    
+}
+
+public struct NdJsonFramer : IItemFramer
+{
+    public void BeginDocument(PipeWriter pipeWriter)
+    {
+    }
+
+    public void FinishItem(PipeWriter pipeWriter) => pipeWriter.Write("\n"u8);
+
+    public void EndDocument(PipeWriter pipeWriter)
+    {
+    }
+}
+
+public struct JsonArrayFramer : IItemFramer
+{
+    private bool _needsComma;
+
+    public void BeginDocument(PipeWriter pipeWriter) => pipeWriter.Write("["u8);
+
+    public void FinishItem(PipeWriter pipeWriter)
+    {
+        if (_needsComma)
+            pipeWriter.Write(","u8);
+        _needsComma = true;
+    }
+
+    public void EndDocument(PipeWriter pipeWriter) => pipeWriter.Write("]"u8);
+}
+
+public struct JsonEnvelopeFramer : IItemFramer
+{
+    private bool _needsComma;
+    private int _count;
+
+    public void BeginDocument(PipeWriter pipeWriter) => pipeWriter.Write("{\"results\":["u8);
+
+    public void FinishItem(PipeWriter pipeWriter)
+    {
+        if (_needsComma)
+            pipeWriter.Write(","u8);
+        _needsComma = true;
+        _count++;
+    }
+
+    public void EndDocument(PipeWriter pipeWriter)
+    {
+        pipeWriter.Write("],\"count\":"u8);
+        Span<byte> buf = stackalloc byte[20];
+        if (System.Buffers.Text.Utf8Formatter.TryFormat(_count, buf, out int written))
+            pipeWriter.Write(buf[..written]);
+        pipeWriter.Write("}"u8);
+    }
+}
+
+internal static class JsonTranscoderExtensions
+{
+    public static bool SequenceEqual(this ReadOnlySequence<byte> a, ReadOnlySpan<byte> b)
+    {
+        // 1. Fast length check
+        if (a.Length != b.Length)
+            return false;
+
+        // 2. Fast path: contiguous memory
+        if (a.IsSingleSegment)
+            return a.FirstSpan.SequenceEqual(b);
+
+        // 3. Slow path: multi-segment sequence
+        int offset = 0;
+        foreach (ReadOnlyMemory<byte> segment in a)
+        {
+            ReadOnlySpan<byte> segmentSpan = segment.Span;
+
+            // Slice the target span to match the current segment's length and compare
+            if (!segmentSpan.SequenceEqual(b.Slice(offset, segmentSpan.Length)))
+                return false;
+
+            offset += segmentSpan.Length;
+        }
+
+        return true;
+    }
+    
+    public static void CopyToken(
+        this PipeWriter pipeWriter, 
+        Utf8JsonReader reader,
+        ReadResult readResult
+    )
+    {
+        int start = (int)reader.TokenStartIndex;
+        int length = (int)(reader.BytesConsumed - reader.TokenStartIndex);
+
+        if (readResult.Buffer.IsSingleSegment)
+        {
+            pipeWriter.Write(readResult.Buffer.FirstSpan.Slice(start, length));
+        }
+        else
+        {
+            var slice = readResult.Buffer.Slice(start, length);
+            foreach (var seg in slice)
+                pipeWriter.Write(seg.Span);
         }
     }
 }

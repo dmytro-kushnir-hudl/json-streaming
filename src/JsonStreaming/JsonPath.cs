@@ -25,18 +25,18 @@ namespace JsonStreaming;
 /// NdJsonPath.Parse("$.users[*].address.city")
 /// </code>
 /// </example>
-public sealed class NdJsonPath
+public sealed class JsonPath
 {
     /// <summary>Sentinel value for an array wildcard segment (<see cref="Builder.Each"/>).</summary>
     public static readonly byte[] Wildcard = [];
 
     /// <summary>Empty path — targets the root.</summary>
-    public static NdJsonPath Root { get; } = new([]);
+    public static JsonPath Root { get; } = new([]);
 
     /// <summary>Pre-encoded UTF-8 path segments. Empty array = wildcard.</summary>
     public readonly byte[][] Segments;
 
-    private NdJsonPath(byte[][] segments) => Segments = segments;
+    private JsonPath(byte[][] segments) => Segments = segments;
 
     /// <summary>Start a path from the root by entering a named object property.</summary>
     public static Builder At(string key) => new Builder().Key(key);
@@ -45,10 +45,10 @@ public sealed class NdJsonPath
     public static Builder Each() => new Builder().Each();
 
     /// <summary>
-    /// Parse a JSONPath string into an <see cref="NdJsonPath"/>.
+    /// Parse a JSONPath string into an <see cref="JsonPath"/>.
     /// Supported subset: <c>$</c>, <c>.property</c>, <c>[*]</c>.
     /// </summary>
-    public static NdJsonPath Parse(ReadOnlySpan<char> jsonPath)
+    public static JsonPath Parse(ReadOnlySpan<char> jsonPath)
     {
         if (jsonPath.IsEmpty)
             return Root;
@@ -81,7 +81,7 @@ public sealed class NdJsonPath
             }
         }
 
-        return new NdJsonPath([.. segments]);
+        return new JsonPath([.. segments]);
     }
 
     /// <summary>
@@ -108,7 +108,7 @@ public sealed class NdJsonPath
 
     // ── Builder ───────────────────────────────────────────────────────────────
 
-    /// <summary>Fluent builder for <see cref="NdJsonPath"/>.</summary>
+    /// <summary>Fluent builder for <see cref="JsonPath"/>.</summary>
     public sealed class Builder
     {
         private readonly List<byte[]> _segments = [];
@@ -138,9 +138,9 @@ public sealed class NdJsonPath
         }
 
         /// <summary>Build the immutable path.</summary>
-        public NdJsonPath Build() => new([.. _segments]);
+        public JsonPath Build() => new([.. _segments]);
 
-        /// <summary>Implicit conversion — allows passing a builder directly where an <see cref="NdJsonPath"/> is expected.</summary>
-        public static implicit operator NdJsonPath(Builder b) => b.Build();
+        /// <summary>Implicit conversion — allows passing a builder directly where an <see cref="JsonPath"/> is expected.</summary>
+        public static implicit operator JsonPath(Builder b) => b.Build();
     }
 }

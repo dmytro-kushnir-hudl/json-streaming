@@ -23,8 +23,8 @@ public class TranscoderBenchmarks
     private byte[] _minified = [];
     private byte[] _formatted = [];
 
-    private static readonly NdJsonPath ProjectTitles = NdJsonPath.At("items").Each().Key("title");
-    private static readonly NdJsonPath ProjectAllItems = NdJsonPath.At("items").Each();
+    private static readonly JsonPath ProjectTitles = JsonPath.At("items").Each().Key("title");
+    private static readonly JsonPath ProjectAllItems = JsonPath.At("items").Each();
 
     [GlobalSetup]
     public void Setup()

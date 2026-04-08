@@ -37,7 +37,7 @@ public class ProjectItemsTests
         var output = PipeWriter.Create(Stream.Null);
 
         await pipe.ProjectItemsAsync(
-            NdJsonPath.At("price"),
+            JsonPath.At("price"),
             output,
             (itemBytes, writer) =>
             {
@@ -56,7 +56,7 @@ public class ProjectItemsTests
         var output = PipeWriter.Create(Stream.Null);
 
         await pipe.ProjectItemsAsync(
-            NdJsonPath.At("shipTo"),
+            JsonPath.At("shipTo"),
             output,
             (itemBytes, writer) =>
             {
@@ -77,7 +77,7 @@ public class ProjectItemsTests
         var output = PipeWriter.Create(Stream.Null);
 
         await pipe.ProjectItemsAsync(
-            NdJsonPath.Each(),
+            JsonPath.Each(),
             output,
             (itemBytes, writer) =>
             {
@@ -98,7 +98,7 @@ public class ProjectItemsTests
         var output = PipeWriter.Create(Stream.Null);
 
         await pipe.ProjectItemsAsync(
-            NdJsonPath.Each().Key("name"),
+            JsonPath.Each().Key("name"),
             output,
             (itemBytes, writer) =>
             {
@@ -117,7 +117,7 @@ public class ProjectItemsTests
         var output = PipeWriter.Create(Stream.Null);
 
         await pipe.ProjectItemsAsync(
-            NdJsonPath.At("nonexistent"),
+            JsonPath.At("nonexistent"),
             output,
             (itemBytes, writer) =>
             {
@@ -140,7 +140,7 @@ public class ProjectItemsTests
         var output = PipeWriter.Create(Stream.Null);
 
         await pipe.ProjectItemsAsync(
-            NdJsonPath.Each(),
+            JsonPath.Each(),
             output,
             (itemBytes, writer) =>
             {
@@ -168,7 +168,7 @@ public class ProjectItemsTests
         var output = PipeWriter.Create(Stream.Null);
 
         await pipe.ProjectItemsAsync(
-            NdJsonPath.At("items").Each(),
+            JsonPath.At("items").Each(),
             output,
             (itemBytes, writer) =>
             {
@@ -191,7 +191,7 @@ public class ProjectItemsTests
         var output = PipeWriter.Create(outputStream);
 
         await pipe.ProjectItemsAsync(
-            NdJsonPath.Each().Key("name"),
+            JsonPath.Each().Key("name"),
             output,
             (itemBytes, writer) =>
             {
@@ -223,7 +223,7 @@ public class ProjectItemsTests
         var output = PipeWriter.Create(Stream.Null);
 
         await pipe.ProjectItemsAsync(
-            NdJsonPath.At("data").Key("pages").Each().Key("todos").Each(),
+            JsonPath.At("data").Key("pages").Each().Key("todos").Each(),
             output,
             (itemBytes, writer) =>
             {
@@ -243,7 +243,7 @@ public class ProjectItemsTests
         var output = PipeWriter.Create(Stream.Null);
 
         await pipe.ProjectItemsAsync(
-            NdJsonPath.At("items").Each(),
+            JsonPath.At("items").Each(),
             output,
             (itemBytes, writer) =>
             {

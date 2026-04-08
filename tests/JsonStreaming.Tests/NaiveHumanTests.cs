@@ -102,7 +102,7 @@ public class NaiveHumanTests
         ]
         """;
 
-    private static string[] Project(string json, NdJsonPath path)
+    private static string[] Project(string json, JsonPath path)
     {
         var bytes = Encoding.UTF8.GetBytes(json);
         var pipe = PipeReader.Create(new MemoryStream(bytes));
@@ -117,14 +117,14 @@ public class NaiveHumanTests
     [Fact]
     public void Project_TopLevelPrimitive()
     {
-        var lines = Project(OrderJson, NdJsonPath.At("price"));
+        var lines = Project(OrderJson, JsonPath.At("price"));
         Assert.Equal(["199.95"], lines);
     }
 
     [Fact]
     public void Project_TopLevelObject()
     {
-        var lines = Project(OrderJson, NdJsonPath.At("shipTo"));
+        var lines = Project(OrderJson, JsonPath.At("shipTo"));
         Assert.Single(lines);
         var obj = JsonDocument.Parse(lines[0]).RootElement;
         Assert.Equal("Bob Brown", obj.GetProperty("name").GetString());
@@ -134,14 +134,14 @@ public class NaiveHumanTests
     [Fact]
     public void Project_NestedPrimitive()
     {
-        var lines = Project(OrderJson, NdJsonPath.At("shipTo").Key("city"));
+        var lines = Project(OrderJson, JsonPath.At("shipTo").Key("city"));
         Assert.Equal(["\"Pretendville\""], lines);
     }
 
     [Fact]
     public void Project_ArrayElements()
     {
-        var lines = Project(PeopleJson, NdJsonPath.Each());
+        var lines = Project(PeopleJson, JsonPath.Each());
         Assert.Equal(3, lines.Length);
         Assert.All(lines, line => JsonDocument.Parse(line));
         Assert.Equal("Adeel Solangi", JsonDocument.Parse(lines[0]).RootElement.GetProperty("name").GetString());
@@ -151,21 +151,21 @@ public class NaiveHumanTests
     [Fact]
     public void Project_PropertyOfEachArrayElement()
     {
-        var lines = Project(PeopleJson, NdJsonPath.Each().Key("name"));
+        var lines = Project(PeopleJson, JsonPath.Each().Key("name"));
         Assert.Equal(["\"Adeel Solangi\"", "\"Afzal Ghaffar\"", "\"Aamir Solangi\""], lines);
     }
 
     [Fact]
     public void Project_NumberOfEachArrayElement()
     {
-        var lines = Project(PeopleJson, NdJsonPath.Each().Key("version"));
+        var lines = Project(PeopleJson, JsonPath.Each().Key("version"));
         Assert.Equal(["6.1", "1.88", "7.27"], lines);
     }
 
     [Fact]
     public void Project_NoMatch_ReturnsEmpty()
     {
-        var lines = Project(OrderJson, NdJsonPath.At("nonexistent"));
+        var lines = Project(OrderJson, JsonPath.At("nonexistent"));
         Assert.Empty(lines);
     }
 }

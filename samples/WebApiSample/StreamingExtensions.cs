@@ -8,7 +8,7 @@ static class StreamingExtensions
 {
     public static async Task<int> ProjectTypedAsync<TIn, TOut>(
         this PipeReader reader,
-        NdJsonPath path,
+        JsonPath path,
         Utf8JsonWriter writer,
         JsonTypeInfo<TIn> inputType,
         JsonTypeInfo<TOut> outputType,
@@ -37,7 +37,7 @@ static class StreamingExtensions
 
     public static async Task<int> ForEachItemAsync(
         this PipeReader reader,
-        NdJsonPath path,
+        JsonPath path,
         Action<ReadOnlySequence<byte>> processItem,
         CancellationToken ct = default)
     {
