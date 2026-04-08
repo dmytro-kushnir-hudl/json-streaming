@@ -4,7 +4,7 @@ using System.Text.Json;
 
 namespace JsonStreaming;
 
-public delegate void Transformer(ReadOnlySequence<byte> itemBytes, PooledByteBufferWriter output);
+public delegate void Transformer(ReadOnlySequence<byte> itemBytes, Writers output);
 
 public static partial class JsonTranscoder
 {
@@ -30,7 +30,7 @@ public static partial class JsonTranscoder
         var state = new FilterStateMachine(new JsonReaderState(options));
         var framer = new NdJsonFramer();
         ct.ThrowIfCancellationRequested();
-
+        await using var utf8Json = new Utf8JsonWriter(output);
         framer.BeginDocument(output);
 
         while (true)
@@ -44,7 +44,7 @@ public static partial class JsonTranscoder
                 if (result.IsCanceled)
                     throw new OperationCanceledException(ct);
 
-                var bytesConsumed = WriteTransformation(state, result, output, selector, transformer, ref framer);
+                var bytesConsumed = WriteTransformation(state, result, output, selector, transformer, ref framer, utf8Json);
                 consumed = buffer.GetPosition(bytesConsumed);
 
                 if (result.IsCompleted || output is { CanGetUnflushedBytes: true, UnflushedBytes: >= FlushThreshold })
@@ -70,7 +70,7 @@ public static partial class JsonTranscoder
         PipeWriter output,
         JsonPath pattern,
         Transformer transformer,
-        ref TFramer framer)
+        ref TFramer framer, Utf8JsonWriter utf8Json)
         where TFramer : struct, IItemFramer
     {
         // When a cross-buffer capture is in progress the pipe has been anchored at the
@@ -103,7 +103,7 @@ public static partial class JsonTranscoder
                 case ParserDirective.YieldValue:
                 {
                     var transformerInput = state.CalculateValueSlice(readResult.Buffer);
-                    transformer(transformerInput, new PooledByteBufferWriter(output));
+                    transformer(transformerInput, new Writers(output, utf8Json));
                     framer.FinishItem(output);
                     break;
                 }
@@ -111,7 +111,7 @@ public static partial class JsonTranscoder
                 case ParserDirective.EndCapture:
                 {
                     var transformerInput = state.CalculateValueSlice(readResult.Buffer);
-                    transformer(transformerInput, new PooledByteBufferWriter(output));
+                    transformer(transformerInput, new Writers(output, utf8Json));
                     framer.FinishItem(output);
                     break;
                 }

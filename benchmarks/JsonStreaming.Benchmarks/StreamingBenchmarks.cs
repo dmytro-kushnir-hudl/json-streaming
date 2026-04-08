@@ -23,11 +23,6 @@ public class StreamingBenchmarks
 
     private byte[] _json = [];
 
-    private const long PipeFlushThreshold = 16_384;
-
-    private static readonly JsonPath ProjectTitlesPath = JsonPath.At("items").Each().Key("title");
-    private static readonly JsonPath ProjectAllItemsPath = JsonPath.At("items").Each();
-
     [GlobalSetup]
     public void Setup()
     {
@@ -63,9 +58,9 @@ public class StreamingBenchmarks
         await pipeReader.TransformItemsAsync(
             pipeWriter,
             JsonPath.At("items").Each(),
-            (itemBytes, bufferWriter) =>
+            (itemBytes, writer) =>
             {
-                bufferWriter.Write(itemBytes);
+                writer.Write(itemBytes);
             });
     }
 
@@ -80,11 +75,10 @@ public class StreamingBenchmarks
             output,
             JsonPath.At("items").Each(),
             
-            (itemBytes, bufferWriter) =>
+            (itemBytes, writer) =>
             {
                 using var doc = JsonDocument.Parse(itemBytes);
                 var root = doc.RootElement;
-                using var writer = new Utf8JsonWriter(bufferWriter, SkipValidation);
                 writer.WriteStartObject();
                 writer.WriteNumber("id"u8, root.GetProperty("id").GetInt32());
                 writer.WriteString("title"u8, root.GetProperty("title").GetString());
@@ -98,16 +92,14 @@ public class StreamingBenchmarks
     [Benchmark(Description = "ProjectItems: transform (Utf8JsonReader, zero-alloc)")]
     public async Task Write_TransformUtf8Reader()
     {
-        var pipe = ToPipe(_json);
-        var output = PipeWriter.Create(Stream.Null);
-        await pipe.TransformItemsAsync(
-            output,
+        await ToPipe(_json).TransformItemsAsync(
+            PipeWriter.Create(Stream.Null),
             JsonPath.At("items").Each(),
-            (itemBytes, bufferWriter) =>
+            (itemBytes, _, writer) =>
             {
-                var reader = new Utf8JsonReader(itemBytes);
-                using var writer = new Utf8JsonWriter(bufferWriter, SkipValidation);
+                var reader = new Utf8JsonReader(itemBytes); 
                 reader.Read(); // StartObject
+                
                 writer.WriteStartObject();
                 while (reader.Read() && reader.TokenType == JsonTokenType.PropertyName)
                 {
@@ -119,11 +111,43 @@ public class StreamingBenchmarks
                     else if (reader.ValueTextEquals("title"u8))
                     {
                         reader.Read();
+                       
                         writer.WritePropertyName("title"u8);
+
                         if (!reader.HasValueSequence && !reader.ValueIsEscaped)
+                        {
                             writer.WriteStringValue(reader.ValueSpan);
+                        }
+                        else if (reader.HasValueSequence && !reader.ValueIsEscaped)
+                        {
+                            // Multi-segment, no escaping: stream segments directly — zero alloc.
+                            var e = reader.ValueSequence.GetEnumerator();
+                            bool hasNext = e.MoveNext();
+                            while (hasNext)
+                            {
+                                var seg = e.Current;
+                                hasNext = e.MoveNext();
+                                writer.WriteStringValueSegment(seg.Span, isFinalSegment: !hasNext);
+                            }
+                        }
                         else
-                            writer.WriteStringValue(reader.GetString());
+                        {
+                            // Escaped (and possibly multi-segment): CopyString unescapes into a buffer.
+                            int maxLen = reader.HasValueSequence
+                                ? (int)reader.ValueSequence.Length
+                                : reader.ValueSpan.Length;
+                            if (maxLen <= 256)
+                            {
+                                Span<byte> buf = stackalloc byte[maxLen];
+                                writer.WriteStringValue(buf[..reader.CopyString(buf)]);
+                            }
+                            else
+                            {
+                                var rented = ArrayPool<byte>.Shared.Rent(maxLen);
+                                try { writer.WriteStringValue(rented.AsSpan(0, reader.CopyString(rented))); }
+                                finally { ArrayPool<byte>.Shared.Return(rented); }
+                            }
+                        }
                     }
                     else
                     {
@@ -132,6 +156,7 @@ public class StreamingBenchmarks
                 }
                 writer.WriteEndObject();
                 writer.Flush();
+                writer.Reset();
             });
     }
 
@@ -145,13 +170,12 @@ public class StreamingBenchmarks
         await pipe.TransformItemsAsync(
             output,
             JsonPath.At("items").Each(),
-            (itemBytes, bufferWriter) =>
+            (itemBytes, bytes, writer) =>
             {
                 var reader = new Utf8JsonReader(itemBytes);
                 var item = JsonSerializer.Deserialize(ref reader, BenchJsonContext.Default.BenchItem);
                 if (item is not null)
                 {
-                    using var writer = new Utf8JsonWriter(bufferWriter, SkipValidation);
                     writer.WriteStartObject();
                     writer.WriteNumber("id"u8, item.Id);
                     writer.WriteString("title"u8, item.Title);
@@ -171,7 +195,7 @@ public class StreamingBenchmarks
         await pipe.TransformItemsAsync(
             output,
             JsonPath.At("items").Each(),
-            (itemBytes, bufferWriter) =>
+            (itemBytes, bufferWriter, json) =>
             {
                 var reader = new Utf8JsonReader(itemBytes);
                 var item = JsonSerializer.Deserialize(ref reader, BenchJsonContext.Default.BenchItem);
@@ -191,20 +215,15 @@ public class StreamingBenchmarks
     public async Task Ndjson_ProjectTitles_Manual()
     {
         var pipe = ToPipe(_json);
-        var output = PipeWriter.Create(Stream.Null);
-        using var writer = new Utf8JsonWriter(output, SkipValidation);
 
         await pipe.TransformItemsAsync(
             PipeWriter.Create(Stream.Null),
             JsonPath.At("items").Each(),
-            (itemBytes, _) =>
+            (itemBytes, outputWriter, _) =>
             {
-                WriteTitleNdjsonLine(itemBytes, writer, output);
+                outputWriter.Write(itemBytes);
             });
 
-        writer.Flush();
-        await output.FlushAsync();
-        await output.CompleteAsync();
     }
 
     [Benchmark(Description = "NDJSON: transcoder projection titles (Utf8JsonWriter)")]
@@ -212,7 +231,7 @@ public class StreamingBenchmarks
     {
         var pipe = ToPipe(_json);
         var writer = PipeWriter.Create(Stream.Null);
-        await pipe.ProjectNdJsonAsync(ProjectTitlesPath, writer);
+        await pipe.ProjectNdJsonAsync((JsonPath)JsonPath.At("items").Each().Key("title"), writer);
         await writer.CompleteAsync();
     }
 
@@ -221,7 +240,7 @@ public class StreamingBenchmarks
     {
         var pipe = ToPipe(_json);
         var writer = PipeWriter.Create(Stream.Null);
-        await pipe.ProjectNdJsonVerbatimAsync(ProjectTitlesPath, writer);
+        await pipe.ProjectNdJsonVerbatimAsync((JsonPath)JsonPath.At("items").Each().Key("title"), writer);
         await writer.CompleteAsync();
     }
 
@@ -234,7 +253,7 @@ public class StreamingBenchmarks
         await pipe.TransformItemsAsync(
             PipeWriter.Create(Stream.Null),
             JsonPath.At("items").Each(),
-            (itemBytes, pw) =>
+            (itemBytes, pw, _ ) =>
             {
                 pw.Write(itemBytes);
                 pw.Write("\n"u8);
@@ -249,7 +268,7 @@ public class StreamingBenchmarks
     {
         var pipe = ToPipe(_json);
         var writer = PipeWriter.Create(Stream.Null);
-        await pipe.ProjectNdJsonAsync(ProjectAllItemsPath, writer);
+        await pipe.ProjectNdJsonAsync((JsonPath)JsonPath.At("items").Each(), writer);
         await writer.CompleteAsync();
     }
 
@@ -258,7 +277,7 @@ public class StreamingBenchmarks
     {
         var pipe = ToPipe(_json);
         var writer = PipeWriter.Create(Stream.Null);
-        await pipe.ProjectNdJsonVerbatimAsync(ProjectAllItemsPath, writer);
+        await pipe.ProjectNdJsonVerbatimAsync((JsonPath)JsonPath.At("items").Each(), writer);
         await writer.CompleteAsync();
     }
 
@@ -268,68 +287,7 @@ public class StreamingBenchmarks
 
     private static PipeReader ToPipe(byte[] data) =>
         PipeReader.Create(new MemoryStream(data), new StreamPipeReaderOptions(bufferSize: 8192));
-
-    private static void WriteTitleNdjsonLine(
-        ReadOnlySequence<byte> itemBytes,
-        Utf8JsonWriter writer,
-        PipeWriter output
-    )
-    {
-        var reader = new Utf8JsonReader(itemBytes);
-
-        while (reader.Read())
-        {
-            if (reader.TokenType != JsonTokenType.PropertyName)
-                continue;
-
-            bool isTitle = reader.ValueTextEquals("title"u8);
-            reader.Read();
-
-            if (!isTitle)
-            {
-                reader.Skip();
-                continue;
-            }
-
-            if (!reader.HasValueSequence && !reader.ValueIsEscaped)
-                writer.WriteStringValue(reader.ValueSpan);
-            else
-                writer.WriteStringValue(reader.GetString());
-
-            writer.Flush();
-            output.Write("\n"u8);
-            writer.Reset();
-            FlushPipeWriterIfNeeded(output);
-            return;
-        }
-    }
-
-    private static void WriteRawSequence(Utf8JsonWriter writer, ReadOnlySequence<byte> itemBytes)
-    {
-        if (itemBytes.IsSingleSegment)
-        {
-            writer.WriteRawValue(itemBytes.FirstSpan, skipInputValidation: true);
-        }
-        else
-        {
-            int len = (int)itemBytes.Length;
-            var rented = ArrayPool<byte>.Shared.Rent(len);
-            itemBytes.CopyTo(rented);
-            writer.WriteRawValue(rented.AsSpan(0, len), skipInputValidation: true);
-            ArrayPool<byte>.Shared.Return(rented);
-        }
-    }
-
-   
-
-    private static void FlushPipeWriterIfNeeded(PipeWriter output)
-    {
-        if (
-            output is { CanGetUnflushedBytes: true, UnflushedBytes: >= PipeFlushThreshold }
-        )
-            output.FlushAsync().GetAwaiter().GetResult();
-    }
-
+    
     private static byte[] MakeJson(int count)
     {
         var sb = new StringBuilder();

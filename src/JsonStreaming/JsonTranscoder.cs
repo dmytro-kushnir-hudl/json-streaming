@@ -145,10 +145,12 @@ public static partial class JsonTranscoder
 
                 var bytesConsumed = WriteTokensOnTheFly(state, result, writer, path.Segments, ref renderer, ref framer);
                 consumed = buffer.GetPosition(bytesConsumed);
+                
+                // ReSharper disable once MethodHasAsyncOverloadWithCancellation - keeping it sync because we know downstream
+                jwriter.Flush();
 
                 if (result.IsCompleted || writer is { CanGetUnflushedBytes: true, UnflushedBytes: >= FlushThreshold })
                 {
-                    jwriter.Flush();
                     await writer.FlushAsync(ct);
                 }
 
