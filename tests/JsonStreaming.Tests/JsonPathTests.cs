@@ -1,6 +1,5 @@
 using System.Text;
 using FluentAssertions;
-using JsonStreaming;
 
 namespace JsonStreaming.Tests;
 

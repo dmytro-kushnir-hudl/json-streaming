@@ -143,7 +143,7 @@ public static partial class JsonTranscoder
                 if (result.IsCanceled)
                     throw new OperationCanceledException(ct);
 
-                var bytesConsumed = WriteProjection(state, result, writer, path.Segments, ref renderer, ref framer);
+                var bytesConsumed = WriteTokensOnTheFly(state, result, writer, path.Segments, ref renderer, ref framer);
                 consumed = buffer.GetPosition(bytesConsumed);
 
                 if (result.IsCompleted || writer is { CanGetUnflushedBytes: true, UnflushedBytes: >= FlushThreshold })
@@ -196,7 +196,7 @@ public static partial class JsonTranscoder
                 if (result.IsCanceled)
                     throw new OperationCanceledException(ct);
 
-                var bytesConsumed = WriteProjection(state, result, writer, path.Segments, ref renderer, ref framer);
+                var bytesConsumed = WriteTokensOnTheFly(state, result, writer, path.Segments, ref renderer, ref framer);
                 consumed = buffer.GetPosition(bytesConsumed);
 
                 if (result.IsCompleted || writer is { CanGetUnflushedBytes: true, UnflushedBytes: >= FlushThreshold })
@@ -216,63 +216,64 @@ public static partial class JsonTranscoder
         framer.EndDocument(writer);
     }
 
-    /// <summary>
-    /// Reads JSON from <paramref name="reader"/>, projects each value matching
-    /// <paramref name="path"/>, lets <paramref name="processItem"/> write a
-    /// transformed item into a temporary in-memory buffer, and emits the
-    /// resulting items as a JSON array to <paramref name="writer"/>.
-    /// </summary>
-    /// <remarks>
-    /// The callback writes to an <see cref="IBufferWriter{T}"/>, not directly to
-    /// the destination pipe. Writing zero bytes skips the item. Any bytes written
-    /// are copied to the output as a single array element.
-    /// </remarks>
-    public static async Task ProjectItemsAsyncHighLevel(
-        this PipeReader reader,
-        JsonPath path,
-        PipeWriter writer,
-        Func<ReadOnlySequence<byte>, IBufferWriter<byte>, ValueTask> processItem,
-        JsonReaderOptions options = default,
-        CancellationToken ct = default)
+    
+
+    private static long WriteTokensOnTheFly<TRenderer, TFramer>(
+        FilterStateMachine stateMachine,
+        ReadResult readResult,
+        PipeWriter pipeWriter,
+        byte[][] pattern,
+        ref TRenderer renderer,
+        ref TFramer framer)
+        where TRenderer : struct, ITokenRenderer
+        where TFramer : struct, IItemFramer
     {
-        var state = new FilterStateMachine { ReaderState = new JsonReaderState(options) };
-        var renderer = new VerbatimRenderer();
-        var framer = new NdJsonFramer();
-        ct.ThrowIfCancellationRequested();
+        var reader = new Utf8JsonReader(
+            readResult.Buffer,
+            readResult.IsCompleted,
+            stateMachine.ReaderState
+        );
 
-        framer.BeginDocument(writer);
+        bool hasToken = reader.Read();
 
-        while (true)
+        while (hasToken)
         {
-            var result = await reader.ReadAsync(ct);
-            var buffer = result.Buffer;
-            var consumed = buffer.Start;
+            var directive = stateMachine.Advance(reader, pattern);
 
-            try
+            switch (directive)
             {
-                if (result.IsCanceled)
-                    throw new OperationCanceledException(ct);
+                case ParserDirective.Skip:
+                    break;
 
-                var bytesConsumed = WriteProjection(state, result, writer, path.Segments, ref renderer, ref framer);
-                consumed = buffer.GetPosition(bytesConsumed);
+                case ParserDirective.YieldValue:
+                    renderer.WriteToken(ref reader, pipeWriter, readResult);
+                    renderer.Reset();
+                    framer.FinishItem(pipeWriter);
+                    break;
 
-                if (result.IsCompleted || writer is { CanGetUnflushedBytes: true, UnflushedBytes: >= FlushThreshold })
-                {
-                    await writer.FlushAsync(ct);
-                }
+                case ParserDirective.BeginCapture:
+                    // Do not advance reader — capture phase will process
+                    // the current StartObject/StartArray on next iteration
+                    continue;
 
-                if (result.IsCompleted)
+                case ParserDirective.Capture:
+                    renderer.WriteToken(ref reader, pipeWriter, readResult);
+                    break;
+
+                case ParserDirective.EndCapture:
+                    renderer.WriteToken(ref reader, pipeWriter, readResult);
+                    renderer.Reset();
+                    framer.FinishItem(pipeWriter);
                     break;
             }
-            finally
-            {
-                reader.AdvanceTo(consumed, buffer.End);
-            }
+
+            hasToken = reader.Read();
         }
 
-        framer.EndDocument(writer);
+        stateMachine.ReaderState = reader.CurrentState;
+        return reader.BytesConsumed;
     }
-
+    
     // ── Item projection (raw-bytes callback) ───────────────────────────────
     
     private static void EnsureAccumulator(ref byte[]? buffer, int needed)

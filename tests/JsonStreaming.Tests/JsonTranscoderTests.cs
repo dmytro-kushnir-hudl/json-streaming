@@ -1,7 +1,7 @@
 using System.IO.Pipelines;
 using System.Text;
+using System.Text.Json;
 using FluentAssertions;
-using JsonStreaming;
 
 namespace JsonStreaming.Tests;
 
@@ -103,15 +103,15 @@ public class JsonTranscoderTests
         var formatted = new string[projected.Length];
         for (int i = 0; i < projected.Length; i++)
         {
-            var doc = System.Text.Json.JsonDocument.Parse(projected[i]);
-            formatted[i] = System.Text.Json.JsonSerializer.Serialize(
+            var doc = JsonDocument.Parse(projected[i]);
+            formatted[i] = JsonSerializer.Serialize(
                 doc.RootElement,
-                new System.Text.Json.JsonSerializerOptions { WriteIndented = true }
+                new JsonSerializerOptions { WriteIndented = true }
             );
 
             // Round-trip: formatted → minified should equal original projection
-            var roundTripped = System.Text.Json.JsonSerializer.Serialize(
-                System.Text.Json.JsonDocument.Parse(formatted[i]).RootElement
+            var roundTripped = JsonSerializer.Serialize(
+                JsonDocument.Parse(formatted[i]).RootElement
             );
             roundTripped.Should().Be(projected[i], $"element {i} should round-trip");
         }

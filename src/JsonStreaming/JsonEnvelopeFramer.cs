@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Buffers.Text;
 using System.IO.Pipelines;
 
 namespace JsonStreaming;
@@ -22,7 +23,7 @@ public struct JsonEnvelopeFramer : IItemFramer
     {
         pipeWriter.Write("],\"count\":"u8);
         Span<byte> buf = stackalloc byte[20];
-        if (System.Buffers.Text.Utf8Formatter.TryFormat(_count, buf, out int written))
+        if (Utf8Formatter.TryFormat(_count, buf, out int written))
             pipeWriter.Write(buf[..written]);
         pipeWriter.Write("}"u8);
     }

@@ -15,13 +15,11 @@ public static partial class JsonTranscoder
     /// <see cref="ReadOnlySequence{T}"/> (valid only during the call) and the
     /// <paramref name="writer"/> for output.
     /// </summary>
-    public static async Task ProjectItemsAsync(
-        PipeReader input,
+    public static async Task TransformItemsAsync(
+        this PipeReader input,
         PipeWriter output,
         JsonPath selector,
-        
         Transformer transformer,
-        
         JsonReaderOptions options = default,
         CancellationToken ct = default)
     {
@@ -67,62 +65,6 @@ public static partial class JsonTranscoder
         framer.EndDocument(output);
     }
     
-    private static long WriteProjection<TRenderer, TFramer>(
-        FilterStateMachine stateMachine,
-        ReadResult readResult,
-        PipeWriter pipeWriter,
-        byte[][] pattern,
-        ref TRenderer renderer,
-        ref TFramer framer)
-        where TRenderer : struct, ITokenRenderer
-        where TFramer : struct, IItemFramer
-    {
-        var reader = new Utf8JsonReader(
-            readResult.Buffer,
-            readResult.IsCompleted,
-            stateMachine.ReaderState
-        );
-
-        bool hasToken = reader.Read();
-
-        while (hasToken)
-        {
-            var directive = stateMachine.Advance(reader, pattern);
-
-            switch (directive)
-            {
-                case ParserDirective.Skip:
-                    break;
-
-                case ParserDirective.YieldValue:
-                    renderer.WriteToken(ref reader, pipeWriter, readResult);
-                    renderer.Reset();
-                    framer.FinishItem(pipeWriter);
-                    break;
-
-                case ParserDirective.BeginCapture:
-                    // Do not advance reader — capture phase will process
-                    // the current StartObject/StartArray on next iteration
-                    continue;
-
-                case ParserDirective.Capture:
-                    renderer.WriteToken(ref reader, pipeWriter, readResult);
-                    break;
-
-                case ParserDirective.EndCapture:
-                    renderer.WriteToken(ref reader, pipeWriter, readResult);
-                    renderer.Reset();
-                    framer.FinishItem(pipeWriter);
-                    break;
-            }
-
-            hasToken = reader.Read();
-        }
-
-        stateMachine.ReaderState = reader.CurrentState;
-        return reader.BytesConsumed;
-    }
-    
     private static long WriteTransformation<TFramer>(
         FilterStateMachine state,
         ReadResult readResult,
@@ -158,9 +100,11 @@ public static partial class JsonTranscoder
                     break;
 
                 case ParserDirective.BeginCapture:
-                    // Record absolute start position relative to the entire ReadResult buffer
+                    // Record absolute start position relative to the entire ReadResult buffer,
+                    // then re-present StartObject/StartArray to the capture phase so _captureDepth
+                    // increments from 0 to 1 — matching the EndObject/EndArray that closes it.
                     captureStartOffset = alreadyParsed + reader.TokenStartIndex;
-                    break;
+                    continue;
 
                 case ParserDirective.YieldValue:
                 {
@@ -208,13 +152,11 @@ public static partial class JsonTranscoder
             
             return consumeUpTo;
         }
-        else
-        {
-            // We aren't capturing, so it is safe to consume everything we've successfully parsed.
-            state.UnconsumedParsedBytes = 0;
-            return absoluteConsumed;
-        }
-    
+
+        // We aren't capturing, so it is safe to consume everything we've successfully parsed.
+        state.UnconsumedParsedBytes = 0;
+        return absoluteConsumed;
+
     }
 
     private sealed class FilterStateMachine
