@@ -125,7 +125,7 @@ public static partial class JsonTranscoder
     )
     {
         var jwriter = new Utf8JsonWriter(writer, writerOptions);
-        var state = new FilterStateMachine { ReaderState = new JsonReaderState(readerOptions) };
+        var state = new FilterStateMachine(new JsonReaderState(readerOptions));
         var renderer = new MinifiedRenderer(jwriter);
         var framer = new NdJsonFramer();
         ct.ThrowIfCancellationRequested();
@@ -178,7 +178,7 @@ public static partial class JsonTranscoder
         CancellationToken ct = default
     )
     {
-        var state = new FilterStateMachine { ReaderState = new JsonReaderState(options) };
+        var state = new FilterStateMachine(new JsonReaderState(options));
         var renderer = new VerbatimRenderer();
         var framer = new NdJsonFramer();
         ct.ThrowIfCancellationRequested();
@@ -215,8 +215,6 @@ public static partial class JsonTranscoder
 
         framer.EndDocument(writer);
     }
-
-    
 
     private static long WriteTokensOnTheFly<TRenderer, TFramer>(
         FilterStateMachine stateMachine,
@@ -270,12 +268,11 @@ public static partial class JsonTranscoder
             hasToken = reader.Read();
         }
 
-        stateMachine.ReaderState = reader.CurrentState;
-        return reader.BytesConsumed;
+        return stateMachine.CompleteSegmentFullConsume(reader.CurrentState, reader.BytesConsumed);
     }
-    
+
     // ── Item projection (raw-bytes callback) ───────────────────────────────
-    
+
     private static void EnsureAccumulator(ref byte[]? buffer, int needed)
     {
         if (buffer == null || buffer.Length < needed)
@@ -400,10 +397,8 @@ public static partial class JsonTranscoder
 
     // ── WriteProjection (unified generic) ──────────────────────────────────────
 
-    
 
     // ── Directive & Strategy types ───────────────────────────────────────
-
 
 
     // ── State classes ─────────────────────────────────────────────────────────

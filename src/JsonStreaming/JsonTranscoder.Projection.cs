@@ -27,8 +27,7 @@ public static partial class JsonTranscoder
         ArgumentNullException.ThrowIfNull(output);
         ArgumentNullException.ThrowIfNull(selector);
 
-        var state = new FilterStateMachine { ReaderState = new JsonReaderState(options) };
-        var renderer = new VerbatimRenderer();
+        var state = new FilterStateMachine(new JsonReaderState(options));
         var framer = new NdJsonFramer();
         ct.ThrowIfCancellationRequested();
 
@@ -74,18 +73,15 @@ public static partial class JsonTranscoder
         ref TFramer framer)
         where TFramer : struct, IItemFramer
     {
-        long alreadyParsed = state.UnconsumedParsedBytes;
-        var unparsedBuffer = readResult.Buffer.Slice(alreadyParsed);
+        // When a cross-buffer capture is in progress the pipe has been anchored at the
+        // capture start, so the new buffer starts exactly there — re-anchor to 0.
+        state.BeginSegment();
 
         var reader = new Utf8JsonReader(
-            unparsedBuffer,
+            readResult.Buffer.Slice(state.UnconsumedParsedBytes),
             readResult.IsCompleted,
             state.ReaderState
         );
-
-        // If we entered this method already capturing, the capture started in a previous read.
-        // Therefore, relative to the current readResult.Buffer, it starts exactly at index 0.
-        long captureStartOffset = state.IsCapturing ? 0 : -1;
 
         bool hasToken = reader.Read();
 
@@ -100,35 +96,23 @@ public static partial class JsonTranscoder
                     break;
 
                 case ParserDirective.BeginCapture:
-                    // Record absolute start position relative to the entire ReadResult buffer,
-                    // then re-present StartObject/StartArray to the capture phase so _captureDepth
-                    // increments from 0 to 1 — matching the EndObject/EndArray that closes it.
-                    captureStartOffset = alreadyParsed + reader.TokenStartIndex;
+                    // CaptureStartOffset recorded inside Advance; re-present StartObject/StartArray
+                    // to the capture phase so _captureDepth increments from 0 to 1.
                     continue;
 
                 case ParserDirective.YieldValue:
                 {
-                    long start = alreadyParsed + reader.TokenStartIndex;
-                    long end = alreadyParsed + reader.BytesConsumed;
-                    var slice = readResult.Buffer.Slice(start, end - start);
-                    
-                    var pooledWriter = new PooledByteBufferWriter(output);
-                    transformer(slice, pooledWriter);
+                    var transformerInput = state.CalculateValueSlice(readResult.Buffer);
+                    transformer(transformerInput, new PooledByteBufferWriter(output));
                     framer.FinishItem(output);
                     break;
                 }
 
                 case ParserDirective.EndCapture:
                 {
-                    long start = captureStartOffset;
-                    long end = alreadyParsed + reader.BytesConsumed;
-                    var sequence = readResult.Buffer.Slice(start, end - start);
-
-                    transformer(sequence, new PooledByteBufferWriter(output));
-                    
+                    var transformerInput = state.CalculateValueSlice(readResult.Buffer);
+                    transformer(transformerInput, new PooledByteBufferWriter(output));
                     framer.FinishItem(output);
-                    
-                    captureStartOffset = -1;
                     break;
                 }
             }
@@ -136,27 +120,7 @@ public static partial class JsonTranscoder
             hasToken = reader.Read();
         }
 
-        state.ReaderState = reader.CurrentState;
-        long absoluteConsumed = alreadyParsed + reader.BytesConsumed;
-
-        // --- THE PIPE FRAMING TRICK ---
-        if (state.IsCapturing)
-        {
-            // We cannot consume past captureStartOffset because we need those bytes to construct 
-            // the full ReadOnlySequence next time. Tell the caller to anchor 'consumed' here.
-            long consumeUpTo = captureStartOffset;
-            
-            // The next buffer will start at 'consumeUpTo'. We have already successfully parsed 
-            // up to 'absoluteConsumed'. So next time, we can safely skip re-parsing the difference.
-            state.UnconsumedParsedBytes = absoluteConsumed - consumeUpTo;
-            
-            return consumeUpTo;
-        }
-
-        // We aren't capturing, so it is safe to consume everything we've successfully parsed.
-        state.UnconsumedParsedBytes = 0;
-        return absoluteConsumed;
-
+        return state.CompleteSegment(reader.CurrentState, reader.BytesConsumed);
     }
 
     private sealed class FilterStateMachine
@@ -167,18 +131,84 @@ public static partial class JsonTranscoder
         private readonly int[] _matchedDepthStack = new int[64];
         private bool _pendingPropertyMatches;
         private int _captureDepth;
-        
+        // Absolute offsets relative to the current readResult.Buffer.
+        // _captureStartOffset: where the current capture began (set on BeginCapture / re-anchored on BeginSegment).
+        // _valueStart/_valueEnd: bounds of the most recently yielded value (set on YieldValue / EndCapture).
+        private long _captureStartOffset;
+        private long _valueStart;
+        private long _valueEnd;
+
         public bool IsCapturing { get; private set; }
-        public JsonReaderState ReaderState;
-        
-        // Tracks how many bytes in the pipe's current buffer we've already parsed.
-        // This prevents Utf8JsonReader from re-parsing the same object chunks over and over.
-        public long UnconsumedParsedBytes; 
+        public JsonReaderState ReaderState { get; private set; }
+        public long UnconsumedParsedBytes { get; private set; }
+
+        public FilterStateMachine(JsonReaderState readerState) => ReaderState = readerState;
+
+        /// <summary>
+        /// Called once per pipe-read iteration, before the <see cref="Utf8JsonReader"/> loop.
+        /// When a cross-buffer capture is in progress the pipe has been anchored at the capture
+        /// start, so the new buffer begins exactly there — re-anchor <c>_captureStartOffset</c>
+        /// to 0 so <see cref="CalculateValueSlice"/> stays correct.
+        /// </summary>
+        public void BeginSegment()
+        {
+            if (IsCapturing)
+                _captureStartOffset = 0;
+        }
+
+        /// <summary>
+        /// Returns the slice of <paramref name="buffer"/> that corresponds to the value most
+        /// recently signalled by <see cref="Advance"/> via <c>YieldValue</c> or <c>EndCapture</c>.
+        /// </summary>
+        public ReadOnlySequence<byte> CalculateValueSlice(ReadOnlySequence<byte> buffer)
+            => buffer.Slice(_valueStart, _valueEnd - _valueStart);
+
+        /// <summary>
+        /// Finalises one read segment: saves <paramref name="readerState"/>, then returns the
+        /// position callers should pass to <c>PipeReader.AdvanceTo</c>.  When a capture is in
+        /// progress the method anchors at <c>_captureStartOffset</c> so those bytes are
+        /// re-presented in the next read; <see cref="UnconsumedParsedBytes"/> is set accordingly
+        /// so the next segment skips re-parsing them.
+        /// </summary>
+        /// <summary>
+        /// Lightweight variant for callers that render tokens on-the-fly and always consume
+        /// everything they parse (e.g. <c>WriteTokensOnTheFly</c>).  Saves reader state and
+        /// returns the absolute consumed position; no pipe-framing anchor logic.
+        /// </summary>
+        public long CompleteSegmentFullConsume(JsonReaderState readerState, long readerBytesConsumed)
+        {
+            ReaderState = readerState;
+            return readerBytesConsumed; // UnconsumedParsedBytes is always 0 for this path
+        }
+
+        /// <summary>
+        /// Full variant for byte-range capture callers.  Saves reader state, then returns the
+        /// position callers should pass to <c>PipeReader.AdvanceTo</c>.  When a capture is in
+        /// progress the method anchors at <c>_captureStartOffset</c> so those bytes are
+        /// re-presented in the next read; <see cref="UnconsumedParsedBytes"/> is set accordingly
+        /// so the next segment skips re-parsing them.
+        /// </summary>
+        /// <param name="readerBytesConsumed">
+        /// <c>reader.BytesConsumed</c> — relative to the slice passed to <see cref="Utf8JsonReader"/>,
+        /// i.e. relative to <see cref="UnconsumedParsedBytes"/> within the current buffer.
+        /// </param>
+        public long CompleteSegment(JsonReaderState readerState, long readerBytesConsumed)
+        {
+            long absoluteConsumed = UnconsumedParsedBytes + readerBytesConsumed;
+            ReaderState = readerState;
+            if (IsCapturing)
+            {
+                UnconsumedParsedBytes = absoluteConsumed - _captureStartOffset;
+                return _captureStartOffset;
+            }
+            UnconsumedParsedBytes = 0;
+            return absoluteConsumed;
+        }
 
         public ParserDirective Advance(Utf8JsonReader reader, byte[][] pattern)
         {
             var tokenType = reader.TokenType;
-            
+
             // ── CAPTURE PHASE ─────────────────────────────────────────
             if (IsCapturing)
             {
@@ -190,6 +220,8 @@ public static partial class JsonTranscoder
                 if (_captureDepth == 0)
                 {
                     IsCapturing = false;
+                    _valueStart = _captureStartOffset;
+                    _valueEnd   = UnconsumedParsedBytes + reader.BytesConsumed;
                     return ParserDirective.EndCapture;
                 }
 
@@ -201,7 +233,7 @@ public static partial class JsonTranscoder
             {
                 case JsonTokenType.PropertyName:
                     _pendingPropertyMatches = _matchedDepth == _depth
-                                              && MatchesPropertyName(pattern, _matchedDepth, reader);
+                        && MatchesPropertyName(pattern, _matchedDepth, reader);
                     return ParserDirective.Skip;
 
                 case JsonTokenType.StartObject:
@@ -211,7 +243,7 @@ public static partial class JsonTranscoder
                     bool parentIsArray = _depth >= 0 && _isArray[_depth];
 
                     bool seg = _matchedDepth == _depth
-                               && MatchesSegment(_matchedDepth, pattern, parentIsArray, _pendingPropertyMatches);
+                        && MatchesSegment(_matchedDepth, pattern, parentIsArray, _pendingPropertyMatches);
                     _pendingPropertyMatches = false;
 
                     _depth++;
@@ -224,7 +256,7 @@ public static partial class JsonTranscoder
                         _matchedDepth = _matchedDepthStack[_depth + 1];
                         IsCapturing = true;
                         _captureDepth = 0;
-                        
+                        _captureStartOffset = UnconsumedParsedBytes + reader.TokenStartIndex;
                         return ParserDirective.BeginCapture;
                     }
 
@@ -242,7 +274,6 @@ public static partial class JsonTranscoder
                         _matchedDepth = _matchedDepthStack[_depth];
                         _depth--;
                     }
-
                     return ParserDirective.Skip;
 
                 default:
@@ -250,18 +281,21 @@ public static partial class JsonTranscoder
                     bool parentIsArray = _depth >= 0 && _isArray[_depth];
 
                     bool seg = _matchedDepth == _depth
-                               && MatchesSegment(_matchedDepth, pattern, parentIsArray, _pendingPropertyMatches);
+                        && MatchesSegment(_matchedDepth, pattern, parentIsArray, _pendingPropertyMatches);
                     _pendingPropertyMatches = false;
 
                     if (seg && _matchedDepth + 1 == pattern.Length)
+                    {
+                        _valueStart = UnconsumedParsedBytes + reader.TokenStartIndex;
+                        _valueEnd   = UnconsumedParsedBytes + reader.BytesConsumed;
                         return ParserDirective.YieldValue;
+                    }
 
                     return ParserDirective.Skip;
                 }
             }
         }
 
-        // Keep MatchesSegment and MatchesPropertyName exactly as they were...
         private static bool MatchesSegment(int matchedDepth, byte[][] pattern, bool parentIsArray, bool pendingPropertyMatches)
         {
             if (matchedDepth >= pattern.Length) return false;
@@ -275,9 +309,10 @@ public static partial class JsonTranscoder
             if (matchedDepth >= pattern.Length) return false;
             var expected = pattern[matchedDepth];
             if (expected.Length == 0) return false;
-            return reader.HasValueSequence ? reader.ValueSequence.SequenceEqual(expected) : reader.ValueSpan.SequenceEqual(expected);
+            return reader.HasValueSequence
+                ? reader.ValueSequence.SequenceEqual(expected)
+                : reader.ValueSpan.SequenceEqual(expected);
         }
-    
     }
 
     private enum ParserDirective

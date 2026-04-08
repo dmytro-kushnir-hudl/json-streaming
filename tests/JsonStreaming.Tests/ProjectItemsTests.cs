@@ -209,4 +209,100 @@ public class ProjectItemsTests
 
         items.Should().BeEmpty();
     }
+
+    // ── CalculateValueSlice tests ────────────────────────────────────────────
+
+    // Verify exact bytes for YieldValue (primitive) — no quoting/unquoting, raw JSON bytes.
+    [Theory]
+    [InlineData("""{"x":42}""",         "x",  "42")]
+    [InlineData("""{"x":3.14}""",       "x",  "3.14")]
+    [InlineData("""{"x":true}""",       "x",  "true")]
+    [InlineData("""{"x":false}""",      "x",  "false")]
+    [InlineData("""{"x":null}""",       "x",  "null")]
+    [InlineData("""{"x":"hello"}""",    "x",  "\"hello\"")]
+    public async Task Slice_Primitive_ExactBytes(string json, string key, string expected)
+    {
+        var captured = new List<string>();
+        await ToPipe(json).TransformItemsAsync(
+            PipeWriter.Create(Stream.Null),
+            JsonPath.At(key),
+            (bytes, _) => captured.Add(Encoding.UTF8.GetString(bytes)),
+            ct: TestContext.Current.CancellationToken);
+
+        captured.Should().Equal(expected);
+    }
+
+    // Verify exact bytes for EndCapture (object/array) in a single buffer.
+    [Theory]
+    [InlineData("""{"x":{}}""",              "x", """{}""")]
+    [InlineData("""{"x":{"a":1}}""",         "x", """{"a":1}""")]
+    [InlineData("""{"x":[1,2,3]}""",         "x", """[1,2,3]""")]
+    [InlineData("""{"x":{"a":{"b":1}}}""",   "x", """{"a":{"b":1}}""")]
+    public async Task Slice_Object_ExactBytes_SingleBuffer(string json, string key, string expected)
+    {
+        var captured = new List<string>();
+        await ToPipe(json, bufferSize: json.Length + 1).TransformItemsAsync(
+            PipeWriter.Create(Stream.Null),
+            JsonPath.At(key),
+            (bytes, _) => captured.Add(Encoding.UTF8.GetString(bytes)),
+            ct: TestContext.Current.CancellationToken);
+
+        captured.Should().Equal(expected);
+    }
+
+    // Same JSON, but buffer sizes that force the object to span multiple pipe reads.
+    // This exercises the BeginSegment() re-anchor and cross-buffer _valueEnd computation.
+    [Theory]
+    [InlineData(1)]
+    [InlineData(4)]
+    [InlineData(7)]
+    [InlineData(13)]
+    public async Task Slice_Object_ExactBytes_CrossBuffer(int bufferSize)
+    {
+        const string json     = """{"x":{"a":1,"b":2}}""";
+        const string expected = """{"a":1,"b":2}""";
+
+        var captured = new List<string>();
+        await ToPipe(json, bufferSize).TransformItemsAsync(
+            PipeWriter.Create(Stream.Null),
+            JsonPath.At("x"),
+            (bytes, _) => captured.Add(Encoding.UTF8.GetString(bytes)),
+            ct: TestContext.Current.CancellationToken);
+
+        captured.Should().Equal(expected);
+    }
+
+    // Multiple items across buffers — each slice must be independent and correct.
+    [Theory]
+    [InlineData(1)]
+    [InlineData(5)]
+    [InlineData(16)]
+    public async Task Slice_MultipleObjects_CrossBuffer_AllCorrect(int bufferSize)
+    {
+        const string json = """[{"id":1},{"id":2},{"id":3}]""";
+        var expected = new[] { """{"id":1}""", """{"id":2}""", """{"id":3}""" };
+
+        var captured = new List<string>();
+        await ToPipe(json, bufferSize).TransformItemsAsync(
+            PipeWriter.Create(Stream.Null),
+            JsonPath.Each(),
+            (bytes, _) => captured.Add(Encoding.UTF8.GetString(bytes)),
+            ct: TestContext.Current.CancellationToken);
+
+        captured.Should().Equal(expected);
+    }
+
+    // Empty object is the minimal EndCapture case: BeginCapture immediately followed by EndCapture.
+    [Fact]
+    public async Task Slice_EmptyObject_ExactBytes()
+    {
+        var captured = new List<string>();
+        await ToPipe("""{"x":{}}""").TransformItemsAsync(
+            PipeWriter.Create(Stream.Null),
+            JsonPath.At("x"),
+            (bytes, _) => captured.Add(Encoding.UTF8.GetString(bytes)),
+            ct: TestContext.Current.CancellationToken);
+
+        captured.Should().Equal("{}");
+    }
 }
