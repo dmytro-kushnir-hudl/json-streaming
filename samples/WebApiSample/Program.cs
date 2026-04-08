@@ -34,14 +34,14 @@ app.MapGet(
         writer.WriteStartArray("comments"u8);
 
         int count = 0;
-        await upstream.Pipe.ProjectItemsAsync(
-            JsonPath.Root,
+        await upstream.Pipe.TransformItemsAsync(
             output,
+            JsonPath.Root,
             (itemBytes, pw) =>
             {
                 writer.WriteRawValue(itemBytes, skipInputValidation: true);
                 count++;
-                return ValueTask.CompletedTask;
+
             },
             ct: ct
         );
@@ -221,9 +221,9 @@ app.MapGet(
         writer.WriteStartArray("comments"u8);
 
         int count = 0;
-        await upstream.Pipe.ProjectItemsAsync(
-            JsonPath.Root,
+        await upstream.Pipe.TransformItemsAsync(
             PipeWriter.Create(Stream.Null),
+            JsonPath.Root,
             (itemBytes, _) =>
             {
                 // Parse only what we need — skip 3 of 5 fields
@@ -235,7 +235,7 @@ app.MapGet(
                 writer.WriteString("body"u8, root.GetProperty("body").GetString());
                 writer.WriteEndObject();
                 count++;
-                return ValueTask.CompletedTask;
+
             },
             ct: ct
         );
@@ -531,14 +531,14 @@ app.MapGet(
         writer.WriteStartArray("todos"u8);
 
         int count = 0;
-        await pipe.ProjectItemsAsync(
-            path,
+        await pipe.TransformItemsAsync(
             output,
+            path,
             (itemBytes, pw) =>
             {
                 writer.WriteRawValue(itemBytes, skipInputValidation: true);
                 count++;
-                return ValueTask.CompletedTask;
+
             },
             ct: ct
         );
@@ -624,14 +624,14 @@ app.MapGet(
         writer.WriteStartArray("products"u8);
 
         int count = 0;
-        await upstream.Pipe.ProjectItemsAsync(
-            path,
+        await upstream.Pipe.TransformItemsAsync(
             output,
+            path,
             (itemBytes, pw) =>
             {
                 writer.WriteRawValue(itemBytes, skipInputValidation: true);
                 count++;
-                return ValueTask.CompletedTask;
+
             },
             ct: ct
         );
@@ -686,14 +686,14 @@ app.MapGet(
             );
 
             int pageCount = 0;
-            await pipe.ProjectItemsAsync(
-                JsonPath.At("todos"),
+            await pipe.TransformItemsAsync(
                 pipeWriter,
+                JsonPath.At("todos"),
                 (itemBytes, pw) =>
                 {
                     writer.WriteRawValue(itemBytes, skipInputValidation: true);
                     pageCount++;
-                    return ValueTask.CompletedTask;
+    
                 },
                 ct: ct
             );

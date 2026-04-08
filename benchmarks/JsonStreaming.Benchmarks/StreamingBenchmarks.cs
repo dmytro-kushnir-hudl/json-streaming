@@ -75,15 +75,15 @@ public class StreamingBenchmarks
             output,
             JsonPath.At("items").Each(),
             
-            (itemBytes, writer) =>
+            (itemBytes, writers) =>
             {
                 using var doc = JsonDocument.Parse(itemBytes);
                 var root = doc.RootElement;
-                writer.WriteStartObject();
-                writer.WriteNumber("id"u8, root.GetProperty("id").GetInt32());
-                writer.WriteString("title"u8, root.GetProperty("title").GetString());
-                writer.WriteEndObject();
-                writer.Flush();
+                writers.Json.WriteStartObject();
+                writers.Json.WriteNumber("id"u8, root.GetProperty("id").GetInt32());
+                writers.Json.WriteString("title"u8, root.GetProperty("title").GetString());
+                writers.Json.WriteEndObject();
+                writers.Json.Flush();
             });
     }
 
@@ -95,11 +95,12 @@ public class StreamingBenchmarks
         await ToPipe(_json).TransformItemsAsync(
             PipeWriter.Create(Stream.Null),
             JsonPath.At("items").Each(),
-            (itemBytes, _, writer) =>
+            (itemBytes, writers) =>
             {
-                var reader = new Utf8JsonReader(itemBytes); 
+                var reader = new Utf8JsonReader(itemBytes);
+                var writer = writers.Json;
                 reader.Read(); // StartObject
-                
+
                 writer.WriteStartObject();
                 while (reader.Read() && reader.TokenType == JsonTokenType.PropertyName)
                 {
@@ -170,17 +171,17 @@ public class StreamingBenchmarks
         await pipe.TransformItemsAsync(
             output,
             JsonPath.At("items").Each(),
-            (itemBytes, bytes, writer) =>
+            (itemBytes, writers) =>
             {
                 var reader = new Utf8JsonReader(itemBytes);
                 var item = JsonSerializer.Deserialize(ref reader, BenchJsonContext.Default.BenchItem);
                 if (item is not null)
                 {
-                    writer.WriteStartObject();
-                    writer.WriteNumber("id"u8, item.Id);
-                    writer.WriteString("title"u8, item.Title);
-                    writer.WriteEndObject();
-                    writer.Flush();
+                    writers.Json.WriteStartObject();
+                    writers.Json.WriteNumber("id"u8, item.Id);
+                    writers.Json.WriteString("title"u8, item.Title);
+                    writers.Json.WriteEndObject();
+                    writers.Json.Flush();
                 }
             });
     }
@@ -195,14 +196,14 @@ public class StreamingBenchmarks
         await pipe.TransformItemsAsync(
             output,
             JsonPath.At("items").Each(),
-            (itemBytes, bufferWriter, json) =>
+            (itemBytes, writers) =>
             {
                 var reader = new Utf8JsonReader(itemBytes);
                 var item = JsonSerializer.Deserialize(ref reader, BenchJsonContext.Default.BenchItem);
                 if (item is not null)
                 {
                     var slim = new BenchItemSlim { Id = item.Id, Title = item.Title };
-                    using var writer = new Utf8JsonWriter(bufferWriter, SkipValidation);
+                    using var writer = new Utf8JsonWriter(writers.Bytes, SkipValidation);
                     JsonSerializer.Serialize(writer, slim, BenchJsonContext.Default.BenchItemSlim);
                     writer.Flush();
                 }
@@ -219,9 +220,9 @@ public class StreamingBenchmarks
         await pipe.TransformItemsAsync(
             PipeWriter.Create(Stream.Null),
             JsonPath.At("items").Each(),
-            (itemBytes, outputWriter, _) =>
+            (itemBytes, writers) =>
             {
-                outputWriter.Write(itemBytes);
+                writers.Write(itemBytes);
             });
 
     }
@@ -253,10 +254,10 @@ public class StreamingBenchmarks
         await pipe.TransformItemsAsync(
             PipeWriter.Create(Stream.Null),
             JsonPath.At("items").Each(),
-            (itemBytes, pw, _ ) =>
+            (itemBytes, writers) =>
             {
-                pw.Write(itemBytes);
-                pw.Write("\n"u8);
+                writers.Write(itemBytes);
+                writers.Write("\n"u8);
             });
 
         await output.FlushAsync();

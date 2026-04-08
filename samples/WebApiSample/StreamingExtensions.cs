@@ -16,20 +16,19 @@ static class StreamingExtensions
         CancellationToken ct = default)
     {
         int count = 0;
-        await reader.ProjectItemsAsync(
-            path,
+        await reader.TransformItemsAsync(
             PipeWriter.Create(Stream.Null),
+            path,
             (itemBytes, _) =>
             {
-                var reader = new Utf8JsonReader(itemBytes);
-                var input = JsonSerializer.Deserialize(ref reader, inputType);
-                if (input is null) return ValueTask.CompletedTask;
+                var r = new Utf8JsonReader(itemBytes);
+                var input = JsonSerializer.Deserialize(ref r, inputType);
+                if (input is null) return;
                 foreach (var result in transform(input))
                 {
                     JsonSerializer.Serialize(writer, result, outputType);
                     count++;
                 }
-                return ValueTask.CompletedTask;
             },
             ct: ct);
         return count;
@@ -42,14 +41,13 @@ static class StreamingExtensions
         CancellationToken ct = default)
     {
         int count = 0;
-        await reader.ProjectItemsAsync(
-            path,
+        await reader.TransformItemsAsync(
             PipeWriter.Create(Stream.Null),
+            path,
             (itemBytes, _) =>
             {
                 processItem(itemBytes);
                 count++;
-                return ValueTask.CompletedTask;
             },
             ct: ct);
         return count;
