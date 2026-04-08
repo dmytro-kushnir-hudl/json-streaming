@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.IO.Pipelines;
 using System.Text;
+using System.Text.Json;
 using FluentAssertions;
 using JsonStreaming;
 
@@ -252,5 +253,95 @@ public class ProjectItemsTests
             });
 
         items.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task ProjectItemsHighLevel_WritesProjectedArray()
+    {
+        var pipe = ToPipe(PeopleJson, bufferSize: 37);
+        await using var outputStream = new MemoryStream();
+        var output = PipeWriter.Create(outputStream);
+
+        await pipe.ProjectItemsAsyncHighLevel(
+            JsonPath.Each(),
+            output,
+            (itemBytes, bufferWriter) =>
+            {
+                var reader = new Utf8JsonReader(itemBytes);
+                var person = JsonDocument.ParseValue(ref reader).RootElement;
+
+                using var writer = new Utf8JsonWriter(bufferWriter);
+                writer.WriteStartObject();
+                writer.WriteString("name", person.GetProperty("name").GetString());
+                writer.WriteEndObject();
+                writer.Flush();
+                return ValueTask.CompletedTask;
+            });
+
+        var result = Encoding.UTF8.GetString(outputStream.ToArray());
+        using var doc = JsonDocument.Parse(result);
+        doc.RootElement.ValueKind.Should().Be(JsonValueKind.Array);
+        doc.RootElement.GetArrayLength().Should().Be(3);
+        doc.RootElement[1].GetProperty("name").GetString().Should().Be("Afzal Ghaffar");
+    }
+
+    [Fact]
+    public async Task ProjectItemsHighLevel_CanSkipItemsByWritingNothing()
+    {
+        var pipe = ToPipe(PeopleJson, bufferSize: 16);
+        await using var outputStream = new MemoryStream();
+        var output = PipeWriter.Create(outputStream);
+
+        await pipe.ProjectItemsAsyncHighLevel(
+            JsonPath.Each(),
+            output,
+            (itemBytes, bufferWriter) =>
+            {
+                var reader = new Utf8JsonReader(itemBytes);
+                var person = JsonDocument.ParseValue(ref reader).RootElement;
+                if (person.GetProperty("version").GetDouble() < 2)
+                    return ValueTask.CompletedTask;
+
+                using var writer = new Utf8JsonWriter(bufferWriter);
+                writer.WriteStartObject();
+                writer.WriteString("name", person.GetProperty("name").GetString());
+                writer.WriteEndObject();
+                writer.Flush();
+                return ValueTask.CompletedTask;
+            });
+
+        using var doc = JsonDocument.Parse(outputStream.ToArray());
+        doc.RootElement.GetArrayLength().Should().Be(2);
+    }
+
+    [Fact]
+    public async Task ProjectItemsHighLevel_LargeItemsStillProjectAcrossBuffers()
+    {
+        var json = $$"""
+            { "items": [
+                { "id": 1, "payload": "{{new string('x', 20_000)}}" },
+                { "id": 2, "payload": "{{new string('y', 20_000)}}" }
+            ] }
+            """;
+
+        var pipe = ToPipe(json, bufferSize: 64);
+        await using var outputStream = new MemoryStream();
+        var output = PipeWriter.Create(outputStream);
+
+        await pipe.ProjectItemsAsyncHighLevel(
+            JsonPath.At("items").Each(),
+            output,
+            (itemBytes, bufferWriter) =>
+            {
+                var reader = new Utf8JsonReader(itemBytes);
+                using var doc = JsonDocument.ParseValue(ref reader);
+                using var writer = new Utf8JsonWriter(bufferWriter);
+                writer.WriteNumberValue(doc.RootElement.GetProperty("id").GetInt32());
+                writer.Flush();
+                return ValueTask.CompletedTask;
+            });
+
+        using var doc = JsonDocument.Parse(outputStream.ToArray());
+        doc.RootElement.EnumerateArray().Select(item => item.GetInt32()).Should().Equal(1, 2);
     }
 }
