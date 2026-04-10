@@ -6,7 +6,7 @@ using BenchmarkDotNet.Toolchains.InProcess.Emit;
 namespace JsonStreaming.Benchmarks;
 
 /// <summary>
-/// Fast in-process benchmarks — no child process spawn, ~5s per benchmark.
+///     Fast in-process benchmarks — no child process spawn, ~5s per benchmark.
 /// </summary>
 public class InProcessConfig : ManualConfig
 {

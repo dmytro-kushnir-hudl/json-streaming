@@ -7,6 +7,27 @@ namespace JsonStreaming.Tests;
 
 public class NaiveHumanTests
 {
+    // ── TransformItemsAsync ───────────────────────────────────────────────────
+
+    // language=JSON
+    private const string OrderJson = """
+                                     { "name"   : "Alice Brown",
+                                       "sku"    : "54321",
+                                       "price"  : 199.95,
+                                       "shipTo" : { "name" : "Bob Brown", "city" : "Pretendville", "zip" : "98999" },
+                                       "billTo" : { "name" : "Alice Brown", "city" : "Pretendville", "zip" : "98999" }
+                                     }
+                                     """;
+
+    // language=JSON
+    private const string PeopleJson = """
+                                      [
+                                        { "name": "Adeel Solangi",  "language": "Sindhi", "version": 6.1  },
+                                        { "name": "Afzal Ghaffar",  "language": "Sindhi", "version": 1.88 },
+                                        { "name": "Aamir Solangi",  "language": "Sindhi", "version": 7.27 }
+                                      ]
+                                      """;
+
     private static readonly HttpClient Client = new();
 
     [Theory]
@@ -80,27 +101,6 @@ public class NaiveHumanTests
         await Assert.ThrowsAnyAsync<JsonException>(() =>
             inputPipe.ProxyFormattedJsonAsync(outputPipe, default, ct));
     }
-
-    // ── TransformItemsAsync ───────────────────────────────────────────────────
-
-    // language=JSON
-    const string OrderJson = """
-        { "name"   : "Alice Brown",
-          "sku"    : "54321",
-          "price"  : 199.95,
-          "shipTo" : { "name" : "Bob Brown", "city" : "Pretendville", "zip" : "98999" },
-          "billTo" : { "name" : "Alice Brown", "city" : "Pretendville", "zip" : "98999" }
-        }
-        """;
-
-    // language=JSON
-    const string PeopleJson = """
-        [
-          { "name": "Adeel Solangi",  "language": "Sindhi", "version": 6.1  },
-          { "name": "Afzal Ghaffar",  "language": "Sindhi", "version": 1.88 },
-          { "name": "Aamir Solangi",  "language": "Sindhi", "version": 7.27 }
-        ]
-        """;
 
     private static string[] Project(string json, JsonPath path)
     {

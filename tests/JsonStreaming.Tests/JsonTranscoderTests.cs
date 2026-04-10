@@ -9,19 +9,32 @@ public class JsonTranscoderTests
 {
     // language=JSON
     private const string OrderJson = """
-        { "name"   : "Alice Brown",
-          "sku"    : "54321",
-          "price"  : 199.95,
-          "shipTo" : { "name" : "Bob Brown", "city" : "Pretendville", "zip" : "98999" },
-          "billTo" : { "name" : "Alice Brown", "city" : "Pretendville", "zip" : "98999" }
-        }
-        """;
+                                     { "name"   : "Alice Brown",
+                                       "sku"    : "54321",
+                                       "price"  : 199.95,
+                                       "shipTo" : { "name" : "Bob Brown", "city" : "Pretendville", "zip" : "98999" },
+                                       "billTo" : { "name" : "Alice Brown", "city" : "Pretendville", "zip" : "98999" }
+                                     }
+                                     """;
 
-    private static PipeReader ToPipe(string json, int bufferSize) =>
-        PipeReader.Create(
+    // ── Composability: projected output round-trips through JsonSerializer ──
+
+    // language=JSON
+    private const string PeopleJson = """
+                                      [
+                                        { "name": "Adeel Solangi",  "language": "Sindhi", "version": 6.1  },
+                                        { "name": "Afzal Ghaffar",  "language": "Sindhi", "version": 1.88 },
+                                        { "name": "Aamir Solangi",  "language": "Sindhi", "version": 7.27 }
+                                      ]
+                                      """;
+
+    private static PipeReader ToPipe(string json, int bufferSize)
+    {
+        return PipeReader.Create(
             new MemoryStream(Encoding.UTF8.GetBytes(json)),
             new StreamPipeReaderOptions(bufferSize: bufferSize)
         );
+    }
 
     private static async Task<string[]> ProjectAsync(string json, JsonPath path, int bufferSize)
     {
@@ -54,13 +67,13 @@ public class JsonTranscoderTests
     public async Task Project_LargeObject_AcrossBufferSizes(int bufferSize)
     {
         var json = $$"""
-            {
-              "items": [
-                { "id": 1, "payload": "{{new string('x', 20_000)}}" },
-                { "id": 2, "payload": "{{new string('y', 20_000)}}" }
-              ]
-            }
-            """;
+                     {
+                       "items": [
+                         { "id": 1, "payload": "{{new string('x', 20_000)}}" },
+                         { "id": 2, "payload": "{{new string('y', 20_000)}}" }
+                       ]
+                     }
+                     """;
         var path = JsonPath.At("items").Each();
 
         var result = await ProjectAsync(json, path, bufferSize);
@@ -70,24 +83,13 @@ public class JsonTranscoderTests
         JsonDocument.Parse(result[1]).RootElement.GetProperty("id").GetInt32().Should().Be(2);
     }
 
-    // ── Composability: projected output round-trips through JsonSerializer ──
-
-    // language=JSON
-    private const string PeopleJson = """
-        [
-          { "name": "Adeel Solangi",  "language": "Sindhi", "version": 6.1  },
-          { "name": "Afzal Ghaffar",  "language": "Sindhi", "version": 1.88 },
-          { "name": "Aamir Solangi",  "language": "Sindhi", "version": 7.27 }
-        ]
-        """;
-
     [Fact]
     public async Task Project_EachElement_RoundTrips()
     {
-        var projected = await ProjectAsync(PeopleJson, JsonPath.Each(), bufferSize: 64);
+        var projected = await ProjectAsync(PeopleJson, JsonPath.Each(), 64);
         projected.Should().HaveCount(3);
 
-        for (int i = 0; i < projected.Length; i++)
+        for (var i = 0; i < projected.Length; i++)
         {
             // verbatim output preserves input whitespace; verify it's valid JSON
             // and that normalising → re-normalising is stable (idempotent round-trip)

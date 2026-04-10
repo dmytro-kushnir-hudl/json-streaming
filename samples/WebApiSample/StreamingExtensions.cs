@@ -4,7 +4,9 @@ using System.Text.Json;
 using System.Text.Json.Serialization.Metadata;
 using JsonStreaming;
 
-static class StreamingExtensions
+namespace WebApiSample;
+
+internal static class StreamingExtensions
 {
     public static async Task<int> ProjectTypedAsync<TIn, TOut>(
         this PipeReader reader,
@@ -15,7 +17,7 @@ static class StreamingExtensions
         Func<TIn, IEnumerable<TOut>> transform,
         CancellationToken ct = default)
     {
-        int count = 0;
+        var count = 0;
         await reader.TransformItemsAsync(
             PipeWriter.Create(Stream.Null),
             path,
@@ -40,7 +42,7 @@ static class StreamingExtensions
         Action<ReadOnlySequence<byte>> processItem,
         CancellationToken ct = default)
     {
-        int count = 0;
+        var count = 0;
         await reader.TransformItemsAsync(
             PipeWriter.Create(Stream.Null),
             path,

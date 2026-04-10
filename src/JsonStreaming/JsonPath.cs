@@ -3,50 +3,57 @@ using System.Text;
 namespace JsonStreaming;
 
 /// <summary>
-/// Root-anchored, compile-time encoded JSON path pattern.
-///
-/// Segments: non-empty byte array = UTF-8 property name to match,
-/// empty byte array (<see cref="Wildcard"/>) = array wildcard (any index).
-///
-/// Max meaningful depth is 64, matching <see cref="System.Text.Json.Utf8JsonReader"/>'s default limit.
+///     Root-anchored, compile-time encoded JSON path pattern.
+///     Segments: non-empty byte array = UTF-8 property name to match,
+///     empty byte array (<see cref="Wildcard" />) = array wildcard (any index).
+///     Max meaningful depth is 64, matching <see cref="System.Text.Json.Utf8JsonReader" />'s default limit.
 /// </summary>
 /// <example>
-/// <code>
+///     <code>
 /// // All elements of the root array:
 /// NdJsonPath.Each()
-///
+/// 
 /// // Property on each array element:
 /// NdJsonPath.Each().Key("name")
-///
+/// 
 /// // Deeply nested:
 /// NdJsonPath.At("users").Each().Key("address").Key("city")
-///
+/// 
 /// // From JSONPath string:
 /// NdJsonPath.Parse("$.users[*].address.city")
 /// </code>
 /// </example>
 public sealed class JsonPath
 {
-    /// <summary>Sentinel value for an array wildcard segment (<see cref="Builder.Each"/>).</summary>
+    /// <summary>Sentinel value for an array wildcard segment (<see cref="Builder.Each" />).</summary>
     public static readonly byte[] Wildcard = [];
-
-    /// <summary>Empty path — targets the root.</summary>
-    public static JsonPath Root { get; } = new([]);
 
     /// <summary>Pre-encoded UTF-8 path segments. Empty array = wildcard.</summary>
     public readonly byte[][] Segments;
 
-    private JsonPath(byte[][] segments) => Segments = segments;
+    private JsonPath(byte[][] segments)
+    {
+        Segments = segments;
+    }
+
+    /// <summary>Empty path — targets the root.</summary>
+    public static JsonPath Root { get; } = new([]);
 
     /// <summary>Start a path from the root by entering a named object property.</summary>
-    public static Builder At(string key) => new Builder().Key(key);
+    public static Builder At(string key)
+    {
+        return new Builder().Key(key);
+    }
 
     /// <summary>Start a path from the root by matching every element of a root-level array.</summary>
-    public static Builder Each() => new Builder().Each();
+    public static Builder Each()
+    {
+        return new Builder().Each();
+    }
 
     /// <summary>
-    /// Parse a JSONPath string into an <see cref="JsonPath"/>.
-    /// Supported subset: <c>$</c>, <c>.property</c>, <c>[*]</c>.
+    ///     Parse a JSONPath string into an <see cref="JsonPath" />.
+    ///     Supported subset: <c>$</c>, <c>.property</c>, <c>[*]</c>.
     /// </summary>
     public static JsonPath Parse(ReadOnlySpan<char> jsonPath)
     {
@@ -54,17 +61,16 @@ public sealed class JsonPath
             return Root;
 
         var segments = new List<byte[]>();
-        int i = 0;
+        var i = 0;
 
         if (i < jsonPath.Length && jsonPath[i] == '$')
             i++;
 
         while (i < jsonPath.Length)
-        {
             if (jsonPath[i] == '.')
             {
                 i++;
-                int start = i;
+                var start = i;
                 while (i < jsonPath.Length && jsonPath[i] != '.' && jsonPath[i] != '[')
                     i++;
                 if (i > start)
@@ -79,13 +85,12 @@ public sealed class JsonPath
             {
                 i++;
             }
-        }
 
         return new JsonPath([.. segments]);
     }
 
     /// <summary>
-    /// Converts this path to a JSONPath string (e.g. <c>$.response[*].messages</c>).
+    ///     Converts this path to a JSONPath string (e.g. <c>$.response[*].messages</c>).
     /// </summary>
     public string ToJsonPath()
     {
@@ -94,21 +99,22 @@ public sealed class JsonPath
 
         var sb = new StringBuilder("$");
         foreach (var seg in Segments)
-        {
             if (seg.Length == 0)
                 sb.Append("[*]");
             else
                 sb.Append('.').Append(Encoding.UTF8.GetString(seg));
-        }
         return sb.ToString();
     }
 
     /// <inheritdoc />
-    public override string ToString() => ToJsonPath();
+    public override string ToString()
+    {
+        return ToJsonPath();
+    }
 
     // ── Builder ───────────────────────────────────────────────────────────────
 
-    /// <summary>Fluent builder for <see cref="JsonPath"/>.</summary>
+    /// <summary>Fluent builder for <see cref="JsonPath" />.</summary>
     public sealed class Builder
     {
         private readonly List<byte[]> _segments = [];
@@ -128,7 +134,10 @@ public sealed class JsonPath
         }
 
         /// <summary>Descend into a named object property (alias for Key).</summary>
-        public Builder Property(string name) => Key(name);
+        public Builder Property(string name)
+        {
+            return Key(name);
+        }
 
         /// <summary>Descend into every element of an array (wildcard index).</summary>
         public Builder Each()
@@ -138,9 +147,15 @@ public sealed class JsonPath
         }
 
         /// <summary>Build the immutable path.</summary>
-        public JsonPath Build() => new([.. _segments]);
+        public JsonPath Build()
+        {
+            return new JsonPath([.. _segments]);
+        }
 
-        /// <summary>Implicit conversion — allows passing a builder directly where an <see cref="JsonPath"/> is expected.</summary>
-        public static implicit operator JsonPath(Builder b) => b.Build();
+        /// <summary>Implicit conversion — allows passing a builder directly where an <see cref="JsonPath" /> is expected.</summary>
+        public static implicit operator JsonPath(Builder b)
+        {
+            return b.Build();
+        }
     }
 }

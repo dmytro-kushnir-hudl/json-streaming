@@ -7,24 +7,22 @@ using BenchmarkDotNet.Order;
 namespace JsonStreaming.Benchmarks;
 
 /// <summary>
-/// Benchmarks for <see cref="JsonTranscoder"/>: format, minify, and NDJSON projection.
-///
-/// Input is pre-generated and kept in memory; output is discarded (<see cref="Stream.Null"/>)
-/// so measurements reflect only transcoding throughput.
+///     Benchmarks for <see cref="JsonTranscoder" />: format, minify, and NDJSON projection.
+///     Input is pre-generated and kept in memory; output is discarded (<see cref="Stream.Null" />)
+///     so measurements reflect only transcoding throughput.
 /// </summary>
 [Config(typeof(InProcessConfig))]
 [MemoryDiagnoser]
 [Orderer(SummaryOrderPolicy.FastestToSlowest)]
 public class TranscoderBenchmarks
 {
-    [Params(50_000)]
-    public int ItemCount { get; set; }
-
-    private byte[] _minified = [];
-    private byte[] _formatted = [];
-
     private static readonly JsonPath ProjectTitles = JsonPath.At("items").Each().Key("title");
     private static readonly JsonPath ProjectAllItems = JsonPath.At("items").Each();
+    private byte[] _formatted = [];
+
+    private byte[] _minified = [];
+
+    [Params(50_000)] public int ItemCount { get; set; }
 
     [GlobalSetup]
     public void Setup()
@@ -98,20 +96,23 @@ public class TranscoderBenchmarks
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    private static PipeReader ToPipe(byte[] data) =>
-        PipeReader.Create(new MemoryStream(data), new StreamPipeReaderOptions(bufferSize: 8192));
+    private static PipeReader ToPipe(byte[] data)
+    {
+        return PipeReader.Create(new MemoryStream(data), new StreamPipeReaderOptions(bufferSize: 8192));
+    }
 
     private static byte[] MakeMinifiedJson(int count)
     {
         var sb = new StringBuilder();
         sb.Append("""{"items":[""");
-        for (int i = 0; i < count; i++)
+        for (var i = 0; i < count; i++)
         {
             if (i > 0) sb.Append(',');
             sb.Append(
-                $$"""{"id":{{i}},"title":"Product {{i}}","brand":"Brand{{i % 10}}","price":{{9.99 + i}},"rating":{{(i % 50) / 10.0}},"stock":{{i % 200}}}"""
+                $$"""{"id":{{i}},"title":"Product {{i}}","brand":"Brand{{i % 10}}","price":{{9.99 + i}},"rating":{{i % 50 / 10.0}},"stock":{{i % 200}}}"""
             );
         }
+
         sb.Append("]}");
         return Encoding.UTF8.GetBytes(sb.ToString());
     }

@@ -1,14 +1,14 @@
 <Solution>
-  <Folder Name="/src/">
-    <Project Path="src/JsonStreaming/JsonStreaming.csproj" />
-  </Folder>
-  <Folder Name="/tests/">
-    <Project Path="tests/JsonStreaming.Tests/JsonStreaming.Tests.csproj" />
-  </Folder>
-  <Folder Name="/samples/">
-    <Project Path="samples/WebApiSample/WebApiSample.csproj" />
-  </Folder>
-  <Folder Name="/benchmarks/">
-    <Project Path="benchmarks/JsonStreaming.Benchmarks/JsonStreaming.Benchmarks.csproj" />
-  </Folder>
+    <Folder Name="/src/">
+        <Project Path="src/JsonStreaming/JsonStreaming.csproj"/>
+    </Folder>
+    <Folder Name="/tests/">
+        <Project Path="tests/JsonStreaming.Tests/JsonStreaming.Tests.csproj"/>
+    </Folder>
+    <Folder Name="/samples/">
+        <Project Path="samples/WebApiSample/WebApiSample.csproj"/>
+    </Folder>
+    <Folder Name="/benchmarks/">
+        <Project Path="benchmarks/JsonStreaming.Benchmarks/JsonStreaming.Benchmarks.csproj"/>
+    </Folder>
 </Solution>

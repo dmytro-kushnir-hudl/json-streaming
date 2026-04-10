@@ -1,10 +1,12 @@
 using System.Buffers;
 using System.IO.Pipelines;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.Json.Serialization.Metadata;
 using JsonStreaming;
 using Microsoft.AspNetCore.Http.Features;
+using WebApiSample;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddHttpClient();
@@ -74,14 +76,15 @@ app.MapGet(
     "/level1/passthrough",
     async (HttpContext ctx, IHttpClientFactory httpFactory, CancellationToken ct) =>
     {
-        await using var upstream = await ctx.StreamFrom(httpFactory, "https://jsonplaceholder.typicode.com/comments", ct);
+        await using var upstream =
+            await ctx.StreamFrom(httpFactory, "https://jsonplaceholder.typicode.com/comments", ct);
 
         await upstream.Pipe.TransformItemsWithEnvelopeAsync(
             ctx.Response.BodyWriter,
             JsonPath.Each(),
             (bytes, w) =>
             {
-                w.Json.WriteRawValue(bytes, skipInputValidation: true);
+                w.Json.WriteRawValue(bytes, true);
                 w.Json.Flush();
                 w.Json.Reset();
             },
@@ -119,7 +122,7 @@ app.MapGet(
                     OriginalPrice = product.Price,
                     SalePrice = Math.Round(product.Price * (1 - product.DiscountPercentage / 100), 2),
                     Rating = product.Rating,
-                    InStock = product.Stock > 0,
+                    InStock = product.Stock > 0
                 }, SampleJsonContext.Default.ProductOutput);
                 w.Json.Flush();
                 w.Json.Reset();
@@ -148,7 +151,7 @@ app.MapGet(
         writer.WriteStartObject();
         writer.WriteStartArray("photos"u8);
 
-        var count = await upstream.Pipe.ProjectTypedAsync(
+        var count = await upstream.Pipe.ProjectTypedAsync<Photo, Photo>(
             JsonPath.Each(),
             writer,
             SampleJsonContext.Default.Photo,
@@ -193,24 +196,27 @@ app.MapGet(
         writer.WriteNumber("limit"u8, limit);
         writer.WriteStartArray("products"u8);
 
-        var count = await upstream.Pipe.ProjectTypedAsync(
+        var count = await upstream.Pipe.ProjectTypedAsync<ProductInput, ProductOutput>(
             JsonPath.At("products"),
             writer,
             SampleJsonContext.Default.ProductInput,
             SampleJsonContext.Default.ProductOutput,
-            product => [new ProductOutput
-            {
-                Id = product.Id,
-                Title = product.Title,
-                Brand = product.Brand ?? "Unknown",
-                OriginalPrice = product.Price,
-                SalePrice = Math.Round(
-                    product.Price * (1 - product.DiscountPercentage / 100),
-                    2
-                ),
-                Rating = product.Rating,
-                InStock = product.Stock > 0,
-            }],
+            product =>
+            [
+                new ProductOutput
+                {
+                    Id = product.Id,
+                    Title = product.Title,
+                    Brand = product.Brand ?? "Unknown",
+                    OriginalPrice = product.Price,
+                    SalePrice = Math.Round(
+                        product.Price * (1 - product.DiscountPercentage / 100),
+                        2
+                    ),
+                    Rating = product.Rating,
+                    InStock = product.Stock > 0
+                }
+            ],
             ct
         );
 
@@ -339,7 +345,8 @@ app.MapGet(
 // Pass ?failAt=N to simulate a mid-stream error at item N (demonstrates error trailer).
 app.MapGet(
     "/ndjson/products",
-    async (HttpContext ctx, IHttpClientFactory httpFactory, CancellationToken ct, int limit = 100, int? failAt = null) =>
+    async (HttpContext ctx, IHttpClientFactory httpFactory, CancellationToken ct, int limit = 100,
+        int? failAt = null) =>
     {
         ctx.Response.ContentType = "application/x-ndjson";
         ctx.Features.Get<IHttpResponseBodyFeature>()?.DisableBuffering();
@@ -353,7 +360,7 @@ app.MapGet(
         var output = ctx.Response.BodyWriter;
         var (header, streamId) = NdjsonEnvelope.CreateHeader();
         output.WriteNdjsonLine(header, SampleJsonContext.Default.NdjsonEnvelope);
-        int count = 0;
+        var count = 0;
 
         try
         {
@@ -386,7 +393,7 @@ app.MapGet(
                             2
                         ),
                         Rating = product.Rating,
-                        InStock = product.Id % 2 == 0,
+                        InStock = product.Id % 2 == 0
                     };
 
                     output.WriteNdjsonLine(line, SampleJsonContext.Default.ProductOutput);
@@ -433,19 +440,20 @@ app.MapGet(
         var output = ctx.Response.BodyWriter;
         var (header, streamId) = NdjsonEnvelope.CreateHeader();
         output.WriteNdjsonLine(header, SampleJsonContext.Default.NdjsonEnvelope);
-        int count = 0;
+        var count = 0;
+        var buf = new ArrayBufferWriter<byte>();
 
         try
         {
+            await using var lw = new Utf8JsonWriter(buf);
+
             await upstream.Pipe.ForEachItemAsync(
                 JsonPath.Each(),
                 itemBytes =>
                 {
                     // Re-serialize compact — upstream may be pretty-printed
                     using var doc = JsonDocument.Parse(itemBytes);
-                    var buf = new ArrayBufferWriter<byte>();
-                    using (var lw = new Utf8JsonWriter(buf))
-                        doc.RootElement.WriteTo(lw);
+                    doc.RootElement.WriteTo(lw);
                     output.Write(buf.WrittenSpan);
                     output.Write([(byte)'\n']);
                     count++;
@@ -515,26 +523,23 @@ app.MapGet(
     "/deep/select-many",
     async (HttpContext ctx, IHttpClientFactory httpFactory, CancellationToken ct) =>
     {
-
         ctx.Response.ContentType = "application/json";
         ctx.Features.Get<IHttpResponseBodyFeature>()?.DisableBuffering();
 
         // Build a nested structure: {"data":{"pages":[{page1},{page2},{page3}]}}
         using var http = httpFactory.CreateClient();
         var pages = new List<string>();
-        for (int skip = 0; skip < 90; skip += 30)
-        {
+        for (var skip = 0; skip < 90; skip += 30)
             pages.Add(
                 await http.GetStringAsync(
                     $"https://dummyjson.com/todos?limit=30&skip={skip}",
                     ct
                 )
             );
-        }
 
         var nested = $$$"""{"data":{"pages":[{{{string.Join(",", pages)}}}]}}""";
         var pipe = PipeReader.Create(
-            new MemoryStream(System.Text.Encoding.UTF8.GetBytes(nested)),
+            new MemoryStream(Encoding.UTF8.GetBytes(nested)),
             new StreamPipeReaderOptions(bufferSize: 8192)
         );
 
@@ -547,15 +552,14 @@ app.MapGet(
         writer.WriteStartObject();
         writer.WriteStartArray("todos"u8);
 
-        int count = 0;
+        var count = 0;
         await pipe.TransformItemsAsync(
             output,
             path,
             (itemBytes, pw) =>
             {
-                writer.WriteRawValue(itemBytes, skipInputValidation: true);
+                writer.WriteRawValue(itemBytes, true);
                 count++;
-
             },
             ct: ct
         );
@@ -563,7 +567,7 @@ app.MapGet(
         writer.WriteEndArray();
         writer.WriteNumber("count"u8, count);
         writer.WriteEndObject();
-        await writer.FlushAsync(ct);
+        writer.Flush();
         await output.FlushAsync(ct);
 
         await pipe.CompleteAsync();
@@ -591,31 +595,34 @@ app.MapGet(
         writer.WriteStartObject();
         writer.WriteStartArray("items"u8);
 
-        var count = await upstream.Pipe.ProjectTypedAsync(
+        var count = await upstream.Pipe.ProjectTypedAsync<ProductInput, ProductOutput>(
             path,
             writer,
             SampleJsonContext.Default.ProductInput,
             SampleJsonContext.Default.ProductOutput,
-            product => [new ProductOutput
-            {
-                Id = product.Id,
-                Title = product.Title,
-                Brand = product.Brand ?? "Unknown",
-                OriginalPrice = product.Price,
-                SalePrice = Math.Round(
-                    product.Price * (1 - product.DiscountPercentage / 100),
-                    2
-                ),
-                Rating = product.Rating,
-                InStock = product.Stock > 0,
-            }],
+            product =>
+            [
+                new ProductOutput
+                {
+                    Id = product.Id,
+                    Title = product.Title,
+                    Brand = product.Brand ?? "Unknown",
+                    OriginalPrice = product.Price,
+                    SalePrice = Math.Round(
+                        product.Price * (1 - product.DiscountPercentage / 100),
+                        2
+                    ),
+                    Rating = product.Rating,
+                    InStock = product.Stock > 0
+                }
+            ],
             ct
         );
 
         writer.WriteEndArray();
         writer.WriteNumber("count"u8, count);
         writer.WriteEndObject();
-        await writer.FlushAsync(ct);
+        writer.Flush();
         await output.FlushAsync(ct);
     }
 );
@@ -628,7 +635,7 @@ app.MapGet(
     {
         await using var upstream = await ctx.StreamFrom(
             httpFactory,
-            "https://dummyjson.com/products?limit=5"
+            "https://dummyjson.com/products?limit=5000"
         );
 
         // Parse from NdJsonPath string — equivalent to NdJsonPath.At("products")
@@ -640,15 +647,14 @@ app.MapGet(
         writer.WriteStartObject();
         writer.WriteStartArray("products"u8);
 
-        int count = 0;
+        var count = 0;
         await upstream.Pipe.TransformItemsAsync(
             output,
             path,
             (itemBytes, pw) =>
             {
-                writer.WriteRawValue(itemBytes, skipInputValidation: true);
+                writer.WriteRawValue(itemBytes, true);
                 count++;
-
             },
             ct: ct
         );
@@ -656,7 +662,7 @@ app.MapGet(
         writer.WriteEndArray();
         writer.WriteNumber("count"u8, count);
         writer.WriteEndObject();
-        await writer.FlushAsync(ct);
+        writer.Flush();
         await output.FlushAsync(ct);
     }
 );
@@ -673,7 +679,6 @@ app.MapGet(
     "/multi-source",
     async (HttpContext ctx, IHttpClientFactory httpFactory, CancellationToken ct) =>
     {
-
         ctx.Response.ContentType = "application/json";
         ctx.Features.Get<IHttpResponseBodyFeature>()?.DisableBuffering();
 
@@ -685,8 +690,8 @@ app.MapGet(
         writer.WriteStartObject();
         writer.WriteStartArray("todos"u8);
 
-        int totalCount = 0;
-        for (int skip = 0; skip < 90; skip += 30)
+        var totalCount = 0;
+        for (var skip = 0; skip < 90; skip += 30)
         {
             using var resp = await http.SendAsync(
                 new HttpRequestMessage(
@@ -702,15 +707,14 @@ app.MapGet(
                 new StreamPipeReaderOptions(bufferSize: 8192)
             );
 
-            int pageCount = 0;
+            var pageCount = 0;
             await pipe.TransformItemsAsync(
                 pipeWriter,
                 JsonPath.At("todos"),
                 (itemBytes, pw) =>
                 {
-                    writer.WriteRawValue(itemBytes, skipInputValidation: true);
+                    writer.WriteRawValue(itemBytes, true);
                     pageCount++;
-    
                 },
                 ct: ct
             );
@@ -730,152 +734,163 @@ app.MapGet(
 
 app.Run();
 
-// ── ASP.NET helper ─────────────────────────────────────────────────────
-
-static class HttpContextExtensions
+namespace WebApiSample
 {
-    /// <summary>
-    /// Fetch a URL with streaming and return a PipeReader handle.
-    /// </summary>
-    public static Task<UpstreamPipe> StreamFrom(
-        this HttpContext ctx,
-        IHttpClientFactory httpFactory,
-        string url,
-        CancellationToken ct = default
-    ) => ctx.StreamFrom(httpFactory, new HttpRequestMessage(HttpMethod.Get, url), ct);
+    // ── ASP.NET helper ─────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Send any HttpRequestMessage with streaming and return a PipeReader handle.
-    /// Use for POST, custom headers, auth tokens, etc.
-    /// </summary>
-    public static async Task<UpstreamPipe> StreamFrom(
-        this HttpContext ctx,
-        IHttpClientFactory httpFactory,
-        HttpRequestMessage request,
-        CancellationToken ct = default
-    )
+    internal static class HttpContextExtensions
     {
-        ctx.Response.ContentType = "application/json";
-        ctx.Features.Get<IHttpResponseBodyFeature>()?.DisableBuffering();
+        /// <summary>
+        ///     Fetch a URL with streaming and return a PipeReader handle.
+        /// </summary>
+        public static Task<UpstreamPipe> StreamFrom(
+            this HttpContext ctx,
+            IHttpClientFactory httpFactory,
+            string url,
+            CancellationToken ct = default
+        )
+        {
+            return ctx.StreamFrom(httpFactory, new HttpRequestMessage(HttpMethod.Get, url), ct);
+        }
 
-        var http = httpFactory.CreateClient();
-        var upstream = await http.SendAsync(
-            request,
-            HttpCompletionOption.ResponseHeadersRead,
-            ct
-        );
-        var stream = await upstream.Content.ReadAsStreamAsync(ct);
-        var pipe = PipeReader.Create(stream, new StreamPipeReaderOptions(bufferSize: 8192));
+        /// <summary>
+        ///     Send any HttpRequestMessage with streaming and return a PipeReader handle.
+        ///     Use for POST, custom headers, auth tokens, etc.
+        /// </summary>
+        public static async Task<UpstreamPipe> StreamFrom(
+            this HttpContext ctx,
+            IHttpClientFactory httpFactory,
+            HttpRequestMessage request,
+            CancellationToken ct = default
+        )
+        {
+            ctx.Response.ContentType = "application/json";
+            ctx.Features.Get<IHttpResponseBodyFeature>()?.DisableBuffering();
 
-        return new UpstreamPipe(pipe, http, upstream);
+            var http = httpFactory.CreateClient();
+            var upstream = await http.SendAsync(
+                request,
+                HttpCompletionOption.ResponseHeadersRead,
+                ct
+            );
+            var stream = await upstream.Content.ReadAsStreamAsync(ct);
+            var pipe = PipeReader.Create(stream, new StreamPipeReaderOptions(bufferSize: 8192));
+
+            return new UpstreamPipe(pipe, http, upstream);
+        }
     }
-}
 
-static class PipeWriterNdjsonExtensions
-{
-    private static readonly byte[] Newline = [(byte)'\n'];
-
-    /// <summary>
-    /// Serialize a value as a single NDJSON line (compact JSON + newline).
-    /// </summary>
-    public static void WriteNdjsonLine<T>(
-        this PipeWriter output,
-        T value,
-        JsonTypeInfo<T> typeInfo
-    )
+    internal static class PipeWriterNdjsonExtensions
     {
-        var buf = new ArrayBufferWriter<byte>();
-        using (var w = new Utf8JsonWriter(buf))
-            JsonSerializer.Serialize(w, value, typeInfo);
-        output.Write(buf.WrittenSpan);
-        output.Write(Newline);
+        private static readonly byte[] Newline = [(byte)'\n'];
+
+        /// <summary>
+        ///     Serialize a value as a single NDJSON line (compact JSON + newline).
+        /// </summary>
+        public static void WriteNdjsonLine<T>(
+            this PipeWriter output,
+            T value,
+            JsonTypeInfo<T> typeInfo
+        )
+        {
+            var buf = new ArrayBufferWriter<byte>();
+            using (var w = new Utf8JsonWriter(buf))
+            {
+                JsonSerializer.Serialize(w, value, typeInfo);
+            }
+
+            output.Write(buf.WrittenSpan);
+            output.Write(Newline);
+        }
     }
-}
 
-sealed class UpstreamPipe(PipeReader pipe, HttpClient http, HttpResponseMessage response)
-    : IAsyncDisposable
-{
-    public PipeReader Pipe => pipe;
-
-    public async ValueTask DisposeAsync()
+    internal sealed class UpstreamPipe(PipeReader pipe, HttpClient http, HttpResponseMessage response)
+        : IAsyncDisposable
     {
-        await pipe.CompleteAsync();
-        response.Dispose();
-        http.Dispose();
+        public PipeReader Pipe => pipe;
+
+        public async ValueTask DisposeAsync()
+        {
+            await pipe.CompleteAsync();
+            response.Dispose();
+            http.Dispose();
+        }
     }
-}
 
 // ── Source-generated JSON types (AOT-compatible, zero reflection) ───────
 
-public sealed record ProductInput
-{
-    public int Id { get; init; }
-    public string Title { get; init; } = "";
-    public string? Brand { get; init; }
-    public double Price { get; init; }
-    public double DiscountPercentage { get; init; }
-    public double Rating { get; init; }
-    public int Stock { get; init; }
-}
-
-public sealed record ProductOutput
-{
-    public int Id { get; init; }
-    public string Title { get; init; } = "";
-    public string Brand { get; init; } = "";
-    public double OriginalPrice { get; init; }
-    public double SalePrice { get; init; }
-    public double Rating { get; init; }
-    public bool InStock { get; init; }
-}
-
-/// <summary>
-/// NDJSON envelope — first and last line of the stream.
-/// Header: {"__stream":"begin","streamId":"...","version":1}
-/// Footer: {"__stream":"end","streamId":"...","count":N}
-/// Error:  {"__stream":"end","streamId":"...","count":N,"error":"..."}
-///
-/// The streamId is a random GUID that must match between header and footer.
-/// Clients verify the footer's streamId matches the header to detect corruption.
-/// </summary>
-public sealed record NdjsonEnvelope
-{
-    [JsonPropertyName("__stream")]
-    public string Stream { get; init; } = "";
-
-    public string StreamId { get; init; } = "";
-    public int? Version { get; init; }
-    public int? Count { get; init; }
-    public string? Error { get; init; }
-
-    public static (NdjsonEnvelope Header, string Id) CreateHeader()
+    public sealed record ProductInput
     {
-        var id = Guid.NewGuid().ToString("N");
-        return (new NdjsonEnvelope { Stream = "begin", StreamId = id, Version = 1 }, id);
+        public int Id { get; init; }
+        public string Title { get; init; } = "";
+        public string? Brand { get; init; }
+        public double Price { get; init; }
+        public double DiscountPercentage { get; init; }
+        public double Rating { get; init; }
+        public int Stock { get; init; }
     }
 
-    public static NdjsonEnvelope CreateFooter(string streamId, int count) =>
-        new() { Stream = "end", StreamId = streamId, Count = count };
+    public sealed record ProductOutput
+    {
+        public int Id { get; init; }
+        public string Title { get; init; } = "";
+        public string Brand { get; init; } = "";
+        public double OriginalPrice { get; init; }
+        public double SalePrice { get; init; }
+        public double Rating { get; init; }
+        public bool InStock { get; init; }
+    }
 
-    public static NdjsonEnvelope CreateErrorFooter(string streamId, int count, string error) =>
-        new() { Stream = "end", StreamId = streamId, Count = count, Error = error };
+    /// <summary>
+    ///     NDJSON envelope — first and last line of the stream.
+    ///     Header: {"__stream":"begin","streamId":"...","version":1}
+    ///     Footer: {"__stream":"end","streamId":"...","count":N}
+    ///     Error:  {"__stream":"end","streamId":"...","count":N,"error":"..."}
+    ///     The streamId is a random GUID that must match between header and footer.
+    ///     Clients verify the footer's streamId matches the header to detect corruption.
+    /// </summary>
+    public sealed record NdjsonEnvelope
+    {
+        [JsonPropertyName("__stream")] public string Stream { get; init; } = "";
+
+        public string StreamId { get; init; } = "";
+        public int? Version { get; init; }
+        public int? Count { get; init; }
+        public string? Error { get; init; }
+
+        public static (NdjsonEnvelope Header, string Id) CreateHeader()
+        {
+            var id = Guid.NewGuid().ToString("N");
+            return (new NdjsonEnvelope { Stream = "begin", StreamId = id, Version = 1 }, id);
+        }
+
+        public static NdjsonEnvelope CreateFooter(string streamId, int count)
+        {
+            return new NdjsonEnvelope { Stream = "end", StreamId = streamId, Count = count };
+        }
+
+        public static NdjsonEnvelope CreateErrorFooter(string streamId, int count, string error)
+        {
+            return new NdjsonEnvelope { Stream = "end", StreamId = streamId, Count = count, Error = error };
+        }
+    }
+
+    public sealed record Photo
+    {
+        public int AlbumId { get; init; }
+        public int Id { get; init; }
+        public string Title { get; init; } = "";
+        public string Url { get; init; } = "";
+        public string ThumbnailUrl { get; init; } = "";
+    }
+
+    [JsonSourceGenerationOptions(
+        PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+    )]
+    [JsonSerializable(typeof(ProductInput))]
+    [JsonSerializable(typeof(ProductOutput))]
+    [JsonSerializable(typeof(Photo))]
+    [JsonSerializable(typeof(NdjsonEnvelope))]
+    public partial class SampleJsonContext : JsonSerializerContext;
 }
-
-public sealed record Photo
-{
-    public int AlbumId { get; init; }
-    public int Id { get; init; }
-    public string Title { get; init; } = "";
-    public string Url { get; init; } = "";
-    public string ThumbnailUrl { get; init; } = "";
-}
-
-[JsonSourceGenerationOptions(
-    PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
-    DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
-)]
-[JsonSerializable(typeof(ProductInput))]
-[JsonSerializable(typeof(ProductOutput))]
-[JsonSerializable(typeof(Photo))]
-[JsonSerializable(typeof(NdjsonEnvelope))]
-public partial class SampleJsonContext : JsonSerializerContext;

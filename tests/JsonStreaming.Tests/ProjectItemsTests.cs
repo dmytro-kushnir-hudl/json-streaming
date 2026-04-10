@@ -7,12 +7,6 @@ namespace JsonStreaming.Tests;
 
 public class ProjectItemsTests
 {
-    private static PipeReader ToPipe(string json, int bufferSize = 64) =>
-        PipeReader.Create(
-            new MemoryStream(Encoding.UTF8.GetBytes(json)),
-            new StreamPipeReaderOptions(bufferSize: bufferSize)
-        );
-
     // language=JSON
     private const string OrderJson = """
                                      { "name": "Alice", "price": 199.95,
@@ -27,6 +21,22 @@ public class ProjectItemsTests
                                         { "name": "Aamir Solangi",  "language": "Sindhi", "version": 7.27 }
                                       ]
                                       """;
+
+    // language=JSON
+    private const string NestedArraysJson = """
+                                            { "data": { "pages": [
+                                                { "todos": [{"id":1},{"id":2}] },
+                                                { "todos": [{"id":3}] }
+                                            ] } }
+                                            """;
+
+    private static PipeReader ToPipe(string json, int bufferSize = 64)
+    {
+        return PipeReader.Create(
+            new MemoryStream(Encoding.UTF8.GetBytes(json)),
+            new StreamPipeReaderOptions(bufferSize: bufferSize)
+        );
+    }
 
     [Fact]
     public async Task ProjectItems_PrimitiveValue_CallbackReceivesBytes()
@@ -113,10 +123,9 @@ public class ProjectItemsTests
         var pipe = ToPipe(PeopleJson, bufferSize);
         var output = PipeWriter.Create(Stream.Null);
 
-        await pipe.TransformItemsAsync(output, JsonPath.Each(), (itemBytes, _) =>
-        {
-            items.Add(Encoding.UTF8.GetString(itemBytes));
-        }, ct: TestContext.Current.CancellationToken);
+        await pipe.TransformItemsAsync(output, JsonPath.Each(),
+            (itemBytes, _) => { items.Add(Encoding.UTF8.GetString(itemBytes)); },
+            ct: TestContext.Current.CancellationToken);
 
         items.Should().HaveCount(3);
         foreach (var item in items)
@@ -136,7 +145,7 @@ public class ProjectItemsTests
                      """;
 
         var items = new List<string>();
-        var pipe = ToPipe(json, bufferSize: 64);
+        var pipe = ToPipe(json, 64);
         var output = PipeWriter.Create(Stream.Null);
 
         await pipe.TransformItemsAsync(
@@ -173,14 +182,6 @@ public class ProjectItemsTests
         lines.Should().Equal("\"Adeel Solangi\"", "\"Afzal Ghaffar\"", "\"Aamir Solangi\"");
     }
 
-    // language=JSON
-    private const string NestedArraysJson = """
-                                            { "data": { "pages": [
-                                                { "todos": [{"id":1},{"id":2}] },
-                                                { "todos": [{"id":3}] }
-                                            ] } }
-                                            """;
-
     [Fact]
     public async Task ProjectItems_SelectMany_FlattensNestedArrays()
     {
@@ -214,12 +215,12 @@ public class ProjectItemsTests
 
     // Verify exact bytes for YieldValue (primitive) — no quoting/unquoting, raw JSON bytes.
     [Theory]
-    [InlineData("""{"x":42}""",         "x",  "42")]
-    [InlineData("""{"x":3.14}""",       "x",  "3.14")]
-    [InlineData("""{"x":true}""",       "x",  "true")]
-    [InlineData("""{"x":false}""",      "x",  "false")]
-    [InlineData("""{"x":null}""",       "x",  "null")]
-    [InlineData("""{"x":"hello"}""",    "x",  "\"hello\"")]
+    [InlineData("""{"x":42}""", "x", "42")]
+    [InlineData("""{"x":3.14}""", "x", "3.14")]
+    [InlineData("""{"x":true}""", "x", "true")]
+    [InlineData("""{"x":false}""", "x", "false")]
+    [InlineData("""{"x":null}""", "x", "null")]
+    [InlineData("""{"x":"hello"}""", "x", "\"hello\"")]
     public async Task Slice_Primitive_ExactBytes(string json, string key, string expected)
     {
         var captured = new List<string>();
@@ -234,14 +235,14 @@ public class ProjectItemsTests
 
     // Verify exact bytes for EndCapture (object/array) in a single buffer.
     [Theory]
-    [InlineData("""{"x":{}}""",              "x", """{}""")]
-    [InlineData("""{"x":{"a":1}}""",         "x", """{"a":1}""")]
-    [InlineData("""{"x":[1,2,3]}""",         "x", """[1,2,3]""")]
-    [InlineData("""{"x":{"a":{"b":1}}}""",   "x", """{"a":{"b":1}}""")]
+    [InlineData("""{"x":{}}""", "x", """{}""")]
+    [InlineData("""{"x":{"a":1}}""", "x", """{"a":1}""")]
+    [InlineData("""{"x":[1,2,3]}""", "x", """[1,2,3]""")]
+    [InlineData("""{"x":{"a":{"b":1}}}""", "x", """{"a":{"b":1}}""")]
     public async Task Slice_Object_ExactBytes_SingleBuffer(string json, string key, string expected)
     {
         var captured = new List<string>();
-        await ToPipe(json, bufferSize: json.Length + 1).TransformItemsAsync(
+        await ToPipe(json, json.Length + 1).TransformItemsAsync(
             PipeWriter.Create(Stream.Null),
             JsonPath.At(key),
             (bytes, _) => captured.Add(Encoding.UTF8.GetString(bytes)),
@@ -259,7 +260,7 @@ public class ProjectItemsTests
     [InlineData(13)]
     public async Task Slice_Object_ExactBytes_CrossBuffer(int bufferSize)
     {
-        const string json     = """{"x":{"a":1,"b":2}}""";
+        const string json = """{"x":{"a":1,"b":2}}""";
         const string expected = """{"a":1,"b":2}""";
 
         var captured = new List<string>();

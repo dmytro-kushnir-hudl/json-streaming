@@ -5,18 +5,16 @@ using System.Text.Json;
 namespace JsonStreaming;
 
 /// <summary>
-/// Streaming JSON transcoding: format, minify, or project arbitrary JSON from a
-/// <see cref="PipeReader"/> to a <see cref="PipeWriter"/> without buffering the
-/// whole document.
-///
-/// <list type="bullet">
-///   <item><see cref="ProxyFormattedJsonAsync"/> — pretty-print (2-space indent)</item>
-///   <item><see cref="ProxyMinifiedJsonAsync"/> — strip whitespace</item>
-///   <item><see cref="TransformItemsAsync"/> — extract matched values with a per-item callback</item>
-/// </list>
-///
-/// All methods respect backpressure: they flush to the writer when the unflushed
-/// buffer exceeds 16 KB.
+///     Streaming JSON transcoding: format, minify, or project arbitrary JSON from a
+///     <see cref="PipeReader" /> to a <see cref="PipeWriter" /> without buffering the
+///     whole document.
+///     <list type="bullet">
+///         <item><see cref="ProxyFormattedJsonAsync" /> — pretty-print (2-space indent)</item>
+///         <item><see cref="ProxyMinifiedJsonAsync" /> — strip whitespace</item>
+///         <item><see cref="TransformItemsAsync" /> — extract matched values with a per-item callback</item>
+///     </list>
+///     All methods respect backpressure: they flush to the writer when the unflushed
+///     buffer exceeds 16 KB.
 /// </summary>
 public static partial class JsonTranscoder
 {
@@ -25,8 +23,8 @@ public static partial class JsonTranscoder
     // ── Pretty-print ──────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Reads JSON from <paramref name="reader"/> and writes it formatted with
-    /// 2-space indentation to <paramref name="writer"/>.
+    ///     Reads JSON from <paramref name="reader" /> and writes it formatted with
+    ///     2-space indentation to <paramref name="writer" />.
     /// </summary>
     public static async Task ProxyFormattedJsonAsync(
         this PipeReader reader,
@@ -68,8 +66,8 @@ public static partial class JsonTranscoder
     // ── Minify ────────────────────────────────────────────────────────────────
 
     /// <summary>
-    /// Reads JSON from <paramref name="reader"/> and writes it with all whitespace
-    /// stripped to <paramref name="writer"/>.
+    ///     Reads JSON from <paramref name="reader" /> and writes it with all whitespace
+    ///     stripped to <paramref name="writer" />.
     /// </summary>
     public static async Task ProxyMinifiedJsonAsync(
         this PipeReader reader,
@@ -178,7 +176,7 @@ public static partial class JsonTranscoder
 
         static void WriteIndent(PipeWriter pw, int depth)
         {
-            for (int i = 0; i < depth; i++)
+            for (var i = 0; i < depth; i++)
                 pw.Write("  "u8);
         }
     }
@@ -206,7 +204,7 @@ public static partial class JsonTranscoder
                 JsonTokenType.StartObject
                     or JsonTokenType.StartArray
                     or JsonTokenType.PropertyName => false,
-                _ => true,
+                _ => true
             };
 
             pipeWriter.CopyToken(reader, readResult);
@@ -226,9 +224,9 @@ public static partial class JsonTranscoder
 
     private sealed class FormattedState
     {
+        public bool AfterColon;
         public int Depth;
         public bool NeedsComma;
-        public bool AfterColon;
         public JsonReaderState State;
     }
 

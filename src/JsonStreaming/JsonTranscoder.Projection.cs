@@ -5,18 +5,18 @@ using System.Text.Json;
 namespace JsonStreaming;
 
 /// <summary>
-/// Callback invoked for each matched item during <see cref="JsonTranscoder.TransformItemsAsync"/>.
-/// <paramref name="itemBytes"/> is the raw UTF-8 bytes of the matched value, valid only for the
-/// duration of the call. Write output via <paramref name="output"/>.
+///     Callback invoked for each matched item during <see cref="JsonTranscoder.TransformItemsAsync" />.
+///     <paramref name="itemBytes" /> is the raw UTF-8 bytes of the matched value, valid only for the
+///     duration of the call. Write output via <paramref name="output" />.
 /// </summary>
 public delegate void Transformer(ReadOnlySequence<byte> itemBytes, Writers output);
 
 public static partial class JsonTranscoder
 {
     /// <summary>
-    /// Reads JSON from <paramref name="input"/>, navigates to each value matching
-    /// <paramref name="selector"/>, and invokes <paramref name="transformer"/> with the
-    /// raw bytes of each matched value. Items are written as newline-delimited JSON.
+    ///     Reads JSON from <paramref name="input" />, navigates to each value matching
+    ///     <paramref name="selector" />, and invokes <paramref name="transformer" /> with the
+    ///     raw bytes of each matched value. Items are written as newline-delimited JSON.
     /// </summary>
     public static Task TransformItemsAsync(
         this PipeReader input,
@@ -25,11 +25,13 @@ public static partial class JsonTranscoder
         Transformer transformer,
         JsonReaderOptions options = default,
         CancellationToken ct = default)
-        => TransformItemsCoreAsync(input, output, selector, transformer, new NdJsonFramer(), options, ct);
+    {
+        return TransformItemsCoreAsync(input, output, selector, transformer, new NdJsonFramer(), options, ct);
+    }
 
     /// <summary>
-    /// Like <see cref="TransformItemsAsync"/> but wraps the output in a JSON array
-    /// (<c>[item,item,…]</c>).
+    ///     Like <see cref="TransformItemsAsync" /> but wraps the output in a JSON array
+    ///     (<c>[item,item,…]</c>).
     /// </summary>
     public static Task TransformItemsAsArrayAsync(
         this PipeReader input,
@@ -38,11 +40,13 @@ public static partial class JsonTranscoder
         Transformer transformer,
         JsonReaderOptions options = default,
         CancellationToken ct = default)
-        => TransformItemsCoreAsync(input, output, selector, transformer, new JsonArrayFramer(), options, ct);
+    {
+        return TransformItemsCoreAsync(input, output, selector, transformer, new JsonArrayFramer(), options, ct);
+    }
 
     /// <summary>
-    /// Like <see cref="TransformItemsAsync"/> but wraps the output in a
-    /// <c>{"results":[…],"count":N}</c> envelope.
+    ///     Like <see cref="TransformItemsAsync" /> but wraps the output in a
+    ///     <c>{"results":[…],"count":N}</c> envelope.
     /// </summary>
     public static Task TransformItemsWithEnvelopeAsync(
         this PipeReader input,
@@ -51,7 +55,9 @@ public static partial class JsonTranscoder
         Transformer transformer,
         JsonReaderOptions options = default,
         CancellationToken ct = default)
-        => TransformItemsCoreAsync(input, output, selector, transformer, new JsonEnvelopeFramer(), options, ct);
+    {
+        return TransformItemsCoreAsync(input, output, selector, transformer, new JsonEnvelopeFramer(), options, ct);
+    }
 
     private static async Task TransformItemsCoreAsync<TFramer>(
         PipeReader input,
@@ -84,13 +90,12 @@ public static partial class JsonTranscoder
                 if (result.IsCanceled)
                     throw new OperationCanceledException(ct);
 
-                var bytesConsumed = WriteTransformation(state, result, output, selector, transformer, ref framer, writers);
+                var bytesConsumed =
+                    WriteTransformation(state, result, output, selector, transformer, ref framer, writers);
                 consumed = buffer.GetPosition(bytesConsumed);
 
                 if (result.IsCompleted || output is { CanGetUnflushedBytes: true, UnflushedBytes: >= FlushThreshold })
-                {
                     await output.FlushAsync(ct);
-                }
 
                 if (result.IsCompleted)
                     break;
@@ -124,7 +129,7 @@ public static partial class JsonTranscoder
             state.ReaderState
         );
 
-        bool hasToken = reader.Read();
+        var hasToken = reader.Read();
 
         while (hasToken)
         {
@@ -166,30 +171,35 @@ public static partial class JsonTranscoder
 
     private sealed class FilterStateMachine
     {
-        private int _depth = -1;
-        private int _matchedDepth;
         private readonly bool[] _isArray = new bool[64];
         private readonly int[] _matchedDepthStack = new int[64];
-        private bool _pendingPropertyMatches;
+
         private int _captureDepth;
+
         // Absolute offsets relative to the current readResult.Buffer.
         // _captureStartOffset: where the current capture began (set on BeginCapture / re-anchored on BeginSegment).
         // _valueStart/_valueEnd: bounds of the most recently yielded value (set on YieldValue / EndCapture).
         private long _captureStartOffset;
-        private long _valueStart;
+        private int _depth = -1;
+        private int _matchedDepth;
+        private bool _pendingPropertyMatches;
         private long _valueEnd;
+        private long _valueStart;
+
+        public FilterStateMachine(JsonReaderState readerState)
+        {
+            ReaderState = readerState;
+        }
 
         public bool IsCapturing { get; private set; }
         public JsonReaderState ReaderState { get; private set; }
         public long UnconsumedParsedBytes { get; private set; }
 
-        public FilterStateMachine(JsonReaderState readerState) => ReaderState = readerState;
-
         /// <summary>
-        /// Called once per pipe-read iteration, before the <see cref="Utf8JsonReader"/> loop.
-        /// When a cross-buffer capture is in progress the pipe has been anchored at the capture
-        /// start, so the new buffer begins exactly there — re-anchor <c>_captureStartOffset</c>
-        /// to 0 so <see cref="CalculateValueSlice"/> stays correct.
+        ///     Called once per pipe-read iteration, before the <see cref="Utf8JsonReader" /> loop.
+        ///     When a cross-buffer capture is in progress the pipe has been anchored at the capture
+        ///     start, so the new buffer begins exactly there — re-anchor <c>_captureStartOffset</c>
+        ///     to 0 so <see cref="CalculateValueSlice" /> stays correct.
         /// </summary>
         public void BeginSegment()
         {
@@ -198,33 +208,36 @@ public static partial class JsonTranscoder
         }
 
         /// <summary>
-        /// Returns the slice of <paramref name="buffer"/> that corresponds to the value most
-        /// recently signalled by <see cref="Advance"/> via <c>YieldValue</c> or <c>EndCapture</c>.
+        ///     Returns the slice of <paramref name="buffer" /> that corresponds to the value most
+        ///     recently signalled by <see cref="Advance" /> via <c>YieldValue</c> or <c>EndCapture</c>.
         /// </summary>
         public ReadOnlySequence<byte> CalculateValueSlice(ReadOnlySequence<byte> buffer)
-            => buffer.Slice(_valueStart, _valueEnd - _valueStart);
+        {
+            return buffer.Slice(_valueStart, _valueEnd - _valueStart);
+        }
 
         /// <summary>
-        /// Full variant for byte-range capture callers.  Saves reader state, then returns the
-        /// position callers should pass to <c>PipeReader.AdvanceTo</c>.  When a capture is in
-        /// progress the method anchors at <c>_captureStartOffset</c> so those bytes are
-        /// re-presented in the next read; <see cref="UnconsumedParsedBytes"/> is set accordingly
-        /// so the next segment skips re-parsing them.
+        ///     Full variant for byte-range capture callers.  Saves reader state, then returns the
+        ///     position callers should pass to <c>PipeReader.AdvanceTo</c>.  When a capture is in
+        ///     progress the method anchors at <c>_captureStartOffset</c> so those bytes are
+        ///     re-presented in the next read; <see cref="UnconsumedParsedBytes" /> is set accordingly
+        ///     so the next segment skips re-parsing them.
         /// </summary>
         /// <param name="readerState"><c>reader.CurrentState</c> after consuming all tokens.</param>
         /// <param name="readerBytesConsumed">
-        /// <c>reader.BytesConsumed</c> — relative to the slice passed to <see cref="Utf8JsonReader"/>,
-        /// i.e. relative to <see cref="UnconsumedParsedBytes"/> within the current buffer.
+        ///     <c>reader.BytesConsumed</c> — relative to the slice passed to <see cref="Utf8JsonReader" />,
+        ///     i.e. relative to <see cref="UnconsumedParsedBytes" /> within the current buffer.
         /// </param>
         public long CompleteSegment(JsonReaderState readerState, long readerBytesConsumed)
         {
-            long absoluteConsumed = UnconsumedParsedBytes + readerBytesConsumed;
+            var absoluteConsumed = UnconsumedParsedBytes + readerBytesConsumed;
             ReaderState = readerState;
             if (IsCapturing)
             {
                 UnconsumedParsedBytes = absoluteConsumed - _captureStartOffset;
                 return _captureStartOffset;
             }
+
             UnconsumedParsedBytes = 0;
             return absoluteConsumed;
         }
@@ -245,7 +258,7 @@ public static partial class JsonTranscoder
                 {
                     IsCapturing = false;
                     _valueStart = _captureStartOffset;
-                    _valueEnd   = UnconsumedParsedBytes + reader.BytesConsumed;
+                    _valueEnd = UnconsumedParsedBytes + reader.BytesConsumed;
                     return ParserDirective.EndCapture;
                 }
 
@@ -257,17 +270,17 @@ public static partial class JsonTranscoder
             {
                 case JsonTokenType.PropertyName:
                     _pendingPropertyMatches = _matchedDepth == _depth
-                        && MatchesPropertyName(pattern, _matchedDepth, reader);
+                                              && MatchesPropertyName(pattern, _matchedDepth, reader);
                     return ParserDirective.Skip;
 
                 case JsonTokenType.StartObject:
                 case JsonTokenType.StartArray:
                 {
-                    bool isArray = tokenType == JsonTokenType.StartArray;
-                    bool parentIsArray = _depth >= 0 && _isArray[_depth];
+                    var isArray = tokenType == JsonTokenType.StartArray;
+                    var parentIsArray = _depth >= 0 && _isArray[_depth];
 
-                    bool seg = _matchedDepth == _depth
-                        && MatchesSegment(_matchedDepth, pattern, parentIsArray, _pendingPropertyMatches);
+                    var seg = _matchedDepth == _depth
+                              && MatchesSegment(_matchedDepth, pattern, parentIsArray, _pendingPropertyMatches);
                     _pendingPropertyMatches = false;
 
                     _depth++;
@@ -298,20 +311,21 @@ public static partial class JsonTranscoder
                         _matchedDepth = _matchedDepthStack[_depth];
                         _depth--;
                     }
+
                     return ParserDirective.Skip;
 
                 default:
                 {
-                    bool parentIsArray = _depth >= 0 && _isArray[_depth];
+                    var parentIsArray = _depth >= 0 && _isArray[_depth];
 
-                    bool seg = _matchedDepth == _depth
-                        && MatchesSegment(_matchedDepth, pattern, parentIsArray, _pendingPropertyMatches);
+                    var seg = _matchedDepth == _depth
+                              && MatchesSegment(_matchedDepth, pattern, parentIsArray, _pendingPropertyMatches);
                     _pendingPropertyMatches = false;
 
                     if (seg && _matchedDepth + 1 == pattern.Length)
                     {
                         _valueStart = UnconsumedParsedBytes + reader.TokenStartIndex;
-                        _valueEnd   = UnconsumedParsedBytes + reader.BytesConsumed;
+                        _valueEnd = UnconsumedParsedBytes + reader.BytesConsumed;
                         return ParserDirective.YieldValue;
                     }
 
@@ -320,7 +334,8 @@ public static partial class JsonTranscoder
             }
         }
 
-        private static bool MatchesSegment(int matchedDepth, byte[][] pattern, bool parentIsArray, bool pendingPropertyMatches)
+        private static bool MatchesSegment(int matchedDepth, byte[][] pattern, bool parentIsArray,
+            bool pendingPropertyMatches)
         {
             if (matchedDepth >= pattern.Length) return false;
             var seg = pattern[matchedDepth];
@@ -345,6 +360,6 @@ public static partial class JsonTranscoder
         YieldValue,
         BeginCapture,
         Capture,
-        EndCapture,
+        EndCapture
     }
 }

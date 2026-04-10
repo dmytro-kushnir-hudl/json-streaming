@@ -3,25 +3,27 @@ using System.IO.Pipelines;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using System.Text.Json.Serialization.Metadata;
 using BenchmarkDotNet.Attributes;
 using BenchmarkDotNet.Order;
 
 namespace JsonStreaming.Benchmarks;
 
 /// <summary>
-/// End-to-end streaming benchmarks: callback → write-through → typed transform.
-/// Single category, sorted fastest-to-slowest, easy to compare.
+///     End-to-end streaming benchmarks: callback → write-through → typed transform.
+///     Single category, sorted fastest-to-slowest, easy to compare.
 /// </summary>
 [Config(typeof(InProcessConfig))]
 [MemoryDiagnoser]
 [Orderer(SummaryOrderPolicy.FastestToSlowest)]
 public class StreamingBenchmarks
 {
-    [Params(200_000)]
-    public int ItemCount { get; set; }
+    // ── Helpers ─────────────────────────────────────────────────────────────
+
+    private static readonly JsonWriterOptions SkipValidation = new() { SkipValidation = true };
 
     private byte[] _json = [];
+
+    [Params(200_000)] public int ItemCount { get; set; }
 
     [GlobalSetup]
     public void Setup()
@@ -58,10 +60,7 @@ public class StreamingBenchmarks
         await pipeReader.TransformItemsAsync(
             pipeWriter,
             JsonPath.At("items").Each(),
-            (itemBytes, writer) =>
-            {
-                writer.Write(itemBytes);
-            });
+            (itemBytes, writer) => { writer.Write(itemBytes); });
     }
 
     // ── 4. TransformItemsAsync: transform via JsonDocument ─────────────────
@@ -74,7 +73,6 @@ public class StreamingBenchmarks
         await pipe.TransformItemsAsync(
             output,
             JsonPath.At("items").Each(),
-            
             (itemBytes, writers) =>
             {
                 using var doc = JsonDocument.Parse(itemBytes);
@@ -104,7 +102,6 @@ public class StreamingBenchmarks
 
                 writer.WriteStartObject();
                 while (reader.Read() && reader.TokenType == JsonTokenType.PropertyName)
-                {
                     if (reader.ValueTextEquals("id"u8))
                     {
                         reader.Read();
@@ -113,7 +110,7 @@ public class StreamingBenchmarks
                     else if (reader.ValueTextEquals("title"u8))
                     {
                         reader.Read();
-                       
+
                         writer.WritePropertyName("title"u8);
 
                         if (!reader.HasValueSequence && !reader.ValueIsEscaped)
@@ -124,18 +121,18 @@ public class StreamingBenchmarks
                         {
                             // Multi-segment, no escaping: stream segments directly — zero alloc.
                             var e = reader.ValueSequence.GetEnumerator();
-                            bool hasNext = e.MoveNext();
+                            var hasNext = e.MoveNext();
                             while (hasNext)
                             {
                                 var seg = e.Current;
                                 hasNext = e.MoveNext();
-                                writer.WriteStringValueSegment(seg.Span, isFinalSegment: !hasNext);
+                                writer.WriteStringValueSegment(seg.Span, !hasNext);
                             }
                         }
                         else
                         {
                             // Escaped (and possibly multi-segment): CopyString unescapes into a buffer.
-                            int maxLen = reader.HasValueSequence
+                            var maxLen = reader.HasValueSequence
                                 ? (int)reader.ValueSequence.Length
                                 : reader.ValueSpan.Length;
                             if (maxLen <= 256)
@@ -146,8 +143,14 @@ public class StreamingBenchmarks
                             else
                             {
                                 var rented = ArrayPool<byte>.Shared.Rent(maxLen);
-                                try { writer.WriteStringValue(rented.AsSpan(0, reader.CopyString(rented))); }
-                                finally { ArrayPool<byte>.Shared.Return(rented); }
+                                try
+                                {
+                                    writer.WriteStringValue(rented.AsSpan(0, reader.CopyString(rented)));
+                                }
+                                finally
+                                {
+                                    ArrayPool<byte>.Shared.Return(rented);
+                                }
                             }
                         }
                     }
@@ -155,7 +158,7 @@ public class StreamingBenchmarks
                     {
                         reader.Skip();
                     }
-                }
+
                 writer.WriteEndObject();
                 writer.Flush();
                 writer.Reset();
@@ -222,11 +225,7 @@ public class StreamingBenchmarks
         await pipe.TransformItemsAsync(
             PipeWriter.Create(Stream.Null),
             JsonPath.At("items").Each(),
-            (itemBytes, writers) =>
-            {
-                writers.Write(itemBytes);
-            });
-
+            (itemBytes, writers) => { writers.Write(itemBytes); });
     }
 
     [Benchmark(Description = "NDJSON: TransformItemsAsync all items")]
@@ -248,25 +247,24 @@ public class StreamingBenchmarks
         await output.CompleteAsync();
     }
 
-    // ── Helpers ─────────────────────────────────────────────────────────────
+    private static PipeReader ToPipe(byte[] data)
+    {
+        return PipeReader.Create(new MemoryStream(data), new StreamPipeReaderOptions(bufferSize: 8192));
+    }
 
-    private static readonly JsonWriterOptions SkipValidation = new() { SkipValidation = true };
-
-    private static PipeReader ToPipe(byte[] data) =>
-        PipeReader.Create(new MemoryStream(data), new StreamPipeReaderOptions(bufferSize: 8192));
-    
     private static byte[] MakeJson(int count)
     {
         var sb = new StringBuilder();
         sb.Append("""{"items":[""");
-        for (int i = 0; i < count; i++)
+        for (var i = 0; i < count; i++)
         {
             if (i > 0)
                 sb.Append(',');
             sb.Append(
-                $$"""{"id":{{i}},"title":"Product {{i}}","brand":"Brand{{i % 10}}","price":{{9.99 + i}},"rating":{{(i % 50) / 10.0}},"stock":{{i % 200}}}"""
+                $$"""{"id":{{i}},"title":"Product {{i}}","brand":"Brand{{i % 10}}","price":{{9.99 + i}},"rating":{{i % 50 / 10.0}},"stock":{{i % 200}}}"""
             );
         }
+
         sb.Append("]}");
         return Encoding.UTF8.GetBytes(sb.ToString());
     }

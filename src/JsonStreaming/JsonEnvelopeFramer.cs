@@ -8,10 +8,13 @@ public struct JsonEnvelopeFramer : IItemFramer
     private bool _needsComma;
     private int _count;
 
-    /// <inheritdoc/>
-    public void BeginDocument(Writers output) => output.Write("{\"results\":["u8);
+    /// <inheritdoc />
+    public void BeginDocument(Writers output)
+    {
+        output.Write("{\"results\":["u8);
+    }
 
-    /// <inheritdoc/>
+    /// <inheritdoc />
     public void FinishItem(Writers output)
     {
         if (_needsComma)
@@ -20,12 +23,12 @@ public struct JsonEnvelopeFramer : IItemFramer
         _count++;
     }
 
-    /// <inheritdoc/>
+    /// <inheritdoc />
     public void EndDocument(Writers output)
     {
         output.Write("],\"count\":"u8);
         Span<byte> buf = stackalloc byte[20];
-        if (Utf8Formatter.TryFormat(_count, buf, out int written))
+        if (Utf8Formatter.TryFormat(_count, buf, out var written))
             output.Write(buf[..written]);
         output.Write("}"u8);
     }
