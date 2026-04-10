@@ -1,12 +1,12 @@
 # JsonStreaming
 
-Bounded-memory streaming JSON array processor for .NET. Reads from `PipeReader`, writes to `Utf8JsonWriter`, with ~15MB working set at 200K items vs 69MB for the standard Deserialize/LINQ/Serialize pattern.
+Bounded-memory streaming JSON array processor for .NET. Reads from `PipeReader`, writes to `Utf8JsonWriter`, with ~3KB managed allocations at 200K items vs 69MB for the standard Deserialize/LINQ/Serialize pattern.
 
 ## Why
 
 `System.Text.Json` has `Utf8JsonReader` (low-level, no async, no `PipeReader`) and `JsonDocument`/`JsonSerializer` (full-buffer). Nothing in between for streaming array enumeration with bounded memory and HTTP backpressure.
 
-This library fills that gap: **2.7x faster, 78% less memory** than the standard .NET pattern for JSON array relay/transform.
+This library fills that gap: **2.0x faster, ~3KB vs 69MB** than the standard .NET pattern for JSON array relay/transform.
 
 ## Install
 
@@ -69,17 +69,17 @@ await JsonStreamReader.ProcessArrayAsync(pipe, "items", itemBytes =>
 
 Benchmarked at 200K items (~18MB JSON), Apple M4 Pro, .NET 10:
 
-| Method | Time | Memory | vs Baseline |
-|--------|------|--------|-------------|
-| **Verbatim passthrough** (`WriteRawValue`) | **51ms** | **15MB** | **2.7x faster, 78% less** |
-| Utf8JsonReader transform (select 2 fields) | 91ms | 15MB | 1.5x faster, 78% less |
-| JsonDocument transform | 125ms | 39MB | 1.1x faster, 44% less |
-| **Baseline** (Deserialize → LINQ → Serialize) | **136ms** | **69MB** | **1.0x** |
-| Typed source-gen transform (TIn → TOut) | 176ms | 78MB | 0.8x, +13% alloc |
+| Method | Time | Allocated | vs Baseline |
+|--------|------|-----------|-------------|
+| **Verbatim passthrough** (direct bytes) | **53ms** | **~3KB** | **2.0x faster, ~3KB vs 69MB** |
+| Utf8JsonReader transform (select 2 fields) | 92ms | ~7KB | 1.2x faster, ~7KB vs 69MB |
+| JsonDocument transform | 119ms | ~24MB | 1.1x slower, 65% less alloc |
+| **Baseline** (Deserialize → LINQ → Serialize) | **109ms** | **~69MB** | **1.0x** |
+| Typed source-gen transform (TIn → TOut) | 165ms | ~89MB | 1.5x slower, +30% alloc |
 
-**Verbatim passthrough** uses `Utf8JsonWriter.WriteRawValue` — zero parsing, single memcpy per item. Items are already validated by `Utf8JsonReader`; no re-parse needed.
+**Verbatim passthrough** copies raw item bytes directly to the output pipe — zero parsing overhead, single memcpy per item. Items are already validated by `Utf8JsonReader`; no re-parse needed.
 
-**Flush is faster than no flush**: periodic `writer.Flush()` resets the internal buffer, preventing unbounded growth. With flush disabled at 200K items: 69ms / 50MB. With 16KB flush: 51ms / 15MB. The GC pressure reduction from smaller buffers more than pays for the flush overhead.
+**Flush is faster than no flush**: periodic `writer.Flush()` resets the internal buffer, preventing unbounded growth. With flush disabled at 200K items: ~69ms / ~50MB allocated. With 16KB flush: ~53ms / ~3KB. The GC pressure reduction from smaller buffers more than pays for the flush overhead.
 
 **GC dump analysis** (14 threads, 243M items processed): zero library objects on the heap. Only ArrayPool bucket cache from returned `Utf8JsonWriter` buffer rentals. All `PipeReader` `BufferSegment` rentals correctly returned via `CompleteAsync` → `Reset` → `ArrayPool.Return`.
 

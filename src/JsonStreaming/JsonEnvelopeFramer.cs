@@ -2,13 +2,16 @@ using System.Buffers.Text;
 
 namespace JsonStreaming;
 
+/// <summary>Frames items as <c>{"results":[item,item,…],"count":N}</c>.</summary>
 public struct JsonEnvelopeFramer : IItemFramer
 {
     private bool _needsComma;
     private int _count;
 
+    /// <inheritdoc/>
     public void BeginDocument(Writers output) => output.Write("{\"results\":["u8);
 
+    /// <inheritdoc/>
     public void FinishItem(Writers output)
     {
         if (_needsComma)
@@ -17,6 +20,7 @@ public struct JsonEnvelopeFramer : IItemFramer
         _count++;
     }
 
+    /// <inheritdoc/>
     public void EndDocument(Writers output)
     {
         output.Write("],\"count\":"u8);

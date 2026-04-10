@@ -4,6 +4,11 @@ using System.Text.Json;
 
 namespace JsonStreaming;
 
+/// <summary>
+/// Callback invoked for each matched item during <see cref="JsonTranscoder.TransformItemsAsync"/>.
+/// <paramref name="itemBytes"/> is the raw UTF-8 bytes of the matched value, valid only for the
+/// duration of the call. Write output via <paramref name="output"/>.
+/// </summary>
 public delegate void Transformer(ReadOnlySequence<byte> itemBytes, Writers output);
 
 public static partial class JsonTranscoder
@@ -64,7 +69,7 @@ public static partial class JsonTranscoder
 
         var state = new FilterStateMachine(new JsonReaderState(options));
         ct.ThrowIfCancellationRequested();
-        await using var utf8Json = new Utf8JsonWriter(output);
+        await using var utf8Json = new Utf8JsonWriter(output, new JsonWriterOptions { SkipValidation = true });
         var writers = new Writers(output, utf8Json);
         framer.BeginDocument(writers);
 
@@ -206,6 +211,7 @@ public static partial class JsonTranscoder
         /// re-presented in the next read; <see cref="UnconsumedParsedBytes"/> is set accordingly
         /// so the next segment skips re-parsing them.
         /// </summary>
+        /// <param name="readerState"><c>reader.CurrentState</c> after consuming all tokens.</param>
         /// <param name="readerBytesConsumed">
         /// <c>reader.BytesConsumed</c> — relative to the slice passed to <see cref="Utf8JsonReader"/>,
         /// i.e. relative to <see cref="UnconsumedParsedBytes"/> within the current buffer.
