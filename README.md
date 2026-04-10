@@ -72,12 +72,23 @@ Benchmarked at 200K items (~18MB JSON), Apple M4 Pro, .NET 10:
 | Method | Time | Allocated | vs Baseline |
 |--------|------|-----------|-------------|
 | **Verbatim passthrough** (direct bytes) | **53ms** | **~3KB** | **2.0x faster, ~3KB vs 69MB** |
-| Utf8JsonReader transform (select 2 fields) | 92ms | ~7KB | 1.2x faster, ~7KB vs 69MB |
-| JsonDocument transform | 119ms | ~24MB | 1.1x slower, 65% less alloc |
+| `Utf8JsonReader` transform — `ValueSpan`/`WriteStringValueSegment` | 93ms | ~7KB | 1.2x faster, zero string alloc |
+| `Utf8JsonReader` transform — `CopyString` (handles escaped) | 93ms | ~7KB | same; simpler code, one extra copy |
+| Manual loop + POCO reuse + `GetString()` | 96ms | ~10MB | 1.1x faster, 86% less alloc |
 | **Baseline** (Deserialize → LINQ → Serialize) | **109ms** | **~69MB** | **1.0x** |
-| Typed source-gen transform (TIn → TOut) | 165ms | ~89MB | 1.5x slower, +30% alloc |
+| `JsonDocument` transform | 119ms | ~24MB | 1.1x slower, 65% less alloc |
+| Typed source-gen `Deserialize` + direct-write | 165ms | ~57MB | 1.5x slower, 83% less alloc |
+| Typed source-gen `TIn → TOut` | 165ms | ~89MB | 1.5x slower, +30% alloc |
 
 **Verbatim passthrough** copies raw item bytes directly to the output pipe — zero parsing overhead, single memcpy per item. Items are already validated by `Utf8JsonReader`; no re-parse needed.
+
+**String allocation ladder** — three levels, each removes a different source of allocation:
+
+1. **Typed source-gen `Deserialize`** (~57MB): allocates a new POCO per item + ALL string fields via `GetString()`, including fields you never write to output.
+2. **Manual loop + POCO reuse + `GetString()`** (~10MB): one POCO allocated at startup, reused for all items; only reads the 2 fields needed; still calls `GetString()` → one `string` allocation per item. The ~10MB is almost entirely 200K title strings (~42B avg each).
+3. **`CopyString` / `ValueSpan`** (~7KB): eliminates the last string allocation. `CopyString(Span<byte>)` decodes the JSON string value into a `stackalloc` buffer without creating a managed `string`; `WriteStringValue(ReadOnlySpan<byte>)` writes the UTF-8 bytes directly. Stay in UTF-8 the entire pipeline.
+
+`CopyString` and the `ValueSpan`/`WriteStringValueSegment` 3-way branch are statistically identical — same time, same allocations. `CopyString` is one API call that handles unescaped, escaped (`\n`, `\uXXXX`), and multi-segment values uniformly; the 3-way branch avoids the extra copy for the common unescaped single-segment case. Use whichever reads more clearly.
 
 **Flush is faster than no flush**: periodic `writer.Flush()` resets the internal buffer, preventing unbounded growth. With flush disabled at 200K items: ~69ms / ~50MB allocated. With 16KB flush: ~53ms / ~3KB. The GC pressure reduction from smaller buffers more than pays for the flush overhead.
 
