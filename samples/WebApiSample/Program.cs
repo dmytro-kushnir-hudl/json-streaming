@@ -10,7 +10,19 @@ using WebApiSample;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddHttpClient();
+builder.Logging.AddConsole();
+builder.Logging.SetMinimumLevel(LogLevel.Warning);
 var app = builder.Build();
+
+app.UseExceptionHandler(errApp => errApp.Run(async ctx =>
+{
+    var ex = ctx.Features.Get<Microsoft.AspNetCore.Diagnostics.IExceptionHandlerFeature>()?.Error;
+    var logger = ctx.RequestServices.GetRequiredService<ILogger<Program>>();
+    logger.LogError(ex, "Unhandled exception on {Method} {Path}", ctx.Request.Method, ctx.Request.Path);
+    ctx.Response.StatusCode = 500;
+    ctx.Response.ContentType = "text/plain";
+    await ctx.Response.WriteAsync(ex?.ToString() ?? "unknown error");
+}));
 
 // ════════════════════════════════════════════════════════════════════════
 // FRAMERS — TransformItemsAsArrayAsync / TransformItemsWithEnvelopeAsync
@@ -197,7 +209,7 @@ app.MapGet(
         writer.WriteStartArray("products"u8);
 
         var count = await upstream.Pipe.ProjectTypedAsync<ProductInput, ProductOutput>(
-            JsonPath.At("products"),
+            JsonPath.At("products").Each(),
             writer,
             SampleJsonContext.Default.ProductInput,
             SampleJsonContext.Default.ProductOutput,
@@ -294,7 +306,7 @@ app.MapGet(
         double totalValue = 0;
 
         await upstream.Pipe.ForEachItemAsync(
-            JsonPath.At("products"),
+            JsonPath.At("products").Each(),
             itemBytes =>
             {
                 var reader = new Utf8JsonReader(itemBytes);
@@ -365,7 +377,7 @@ app.MapGet(
         try
         {
             await upstream.Pipe.ForEachItemAsync(
-                JsonPath.At("products"),
+                JsonPath.At("products").Each(),
                 itemBytes =>
                 {
                     var reader = new Utf8JsonReader(itemBytes);
@@ -441,19 +453,21 @@ app.MapGet(
         var (header, streamId) = NdjsonEnvelope.CreateHeader();
         output.WriteNdjsonLine(header, SampleJsonContext.Default.NdjsonEnvelope);
         var count = 0;
-        var buf = new ArrayBufferWriter<byte>();
 
         try
         {
-            await using var lw = new Utf8JsonWriter(buf);
-
             await upstream.Pipe.ForEachItemAsync(
                 JsonPath.Each(),
                 itemBytes =>
                 {
-                    // Re-serialize compact — upstream may be pretty-printed
+                    // Re-serialize compact — upstream may be pretty-printed.
+                    // buf and lw are per-item: buf must be fresh each call or WrittenSpan
+                    // would accumulate bytes from all previous items.
+                    var buf = new ArrayBufferWriter<byte>();
+                    using var lw = new Utf8JsonWriter(buf);
                     using var doc = JsonDocument.Parse(itemBytes);
                     doc.RootElement.WriteTo(lw);
+                    lw.Flush();
                     output.Write(buf.WrittenSpan);
                     output.Write([(byte)'\n']);
                     count++;
@@ -543,18 +557,19 @@ app.MapGet(
             new StreamPipeReaderOptions(bufferSize: 8192)
         );
 
-        // Deep path: navigate data → pages → [*] → todos
-        var path = JsonPath.At("data").Key("pages").Each().Key("todos");
+        // Deep path: navigate data → pages → [*] → todos → [*] (individual items)
+        var path = JsonPath.At("data").Key("pages").Each().Key("todos").Each();
 
         var output = ctx.Response.BodyWriter;
         await using var writer = new Utf8JsonWriter(output);
 
         writer.WriteStartObject();
         writer.WriteStartArray("todos"u8);
+        writer.Flush(); // commit outer envelope bytes before framer could write directly to output
 
         var count = 0;
         await pipe.TransformItemsAsync(
-            output,
+            PipeWriter.Create(Stream.Null), // framer writes go nowhere; all output via outer writer
             path,
             (itemBytes, pw) =>
             {
@@ -586,8 +601,8 @@ app.MapGet(
         );
 
         // DummyJSON wraps products in {"products": [...], "total": ...}
-        // Navigate with NdJsonPath: $.products
-        var path = JsonPath.At("products");
+        // Navigate with NdJsonPath: $.products[*]
+        var path = JsonPath.At("products").Each();
 
         var output = ctx.Response.BodyWriter;
         await using var writer = new Utf8JsonWriter(output);
@@ -638,18 +653,19 @@ app.MapGet(
             "https://dummyjson.com/products?limit=5000"
         );
 
-        // Parse from NdJsonPath string — equivalent to NdJsonPath.At("products")
-        var path = JsonPath.Parse("$.products");
+        // Parse from NdJsonPath string — equivalent to JsonPath.At("products").Each()
+        var path = JsonPath.Parse("$.products[*]");
 
         var output = ctx.Response.BodyWriter;
         await using var writer = new Utf8JsonWriter(output);
 
         writer.WriteStartObject();
         writer.WriteStartArray("products"u8);
+        writer.Flush(); // commit outer envelope bytes before framer could write directly to output
 
         var count = 0;
         await upstream.Pipe.TransformItemsAsync(
-            output,
+            PipeWriter.Create(Stream.Null), // framer writes go nowhere; all output via outer writer
             path,
             (itemBytes, pw) =>
             {
@@ -689,6 +705,7 @@ app.MapGet(
 
         writer.WriteStartObject();
         writer.WriteStartArray("todos"u8);
+        writer.Flush(); // commit outer envelope bytes before framer could write directly to pipeWriter
 
         var totalCount = 0;
         for (var skip = 0; skip < 90; skip += 30)
@@ -709,8 +726,8 @@ app.MapGet(
 
             var pageCount = 0;
             await pipe.TransformItemsAsync(
-                pipeWriter,
-                JsonPath.At("todos"),
+                PipeWriter.Create(Stream.Null), // framer writes go nowhere; all output via outer writer
+                JsonPath.At("todos").Each(),
                 (itemBytes, pw) =>
                 {
                     writer.WriteRawValue(itemBytes, true);
